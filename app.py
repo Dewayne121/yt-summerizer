@@ -107,18 +107,13 @@ def get_transcript_with_ytdlp(youtube_url: str):
             cmd = ['yt-dlp', '--write-auto-subs', '--write-subs', '--sub-langs', 'en.*', '--sub-format', 'vtt', '--skip-download']
             
             # --- FINAL, STABLE STRATEGY: Proxy + Cookies + User-Agent ---
-            # This combination does not rely on the fragile --impersonate flag.
-            
-            # 1. Add a standard browser User-Agent header to look like a real browser
             user_agent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
             cmd.extend(['--user-agent', user_agent])
             
-            # 2. Add the proxy if it exists
             if proxy_url:
                 logger.info("Using a proxy for the request.")
                 cmd.extend(['--proxy', proxy_url])
             
-            # 3. Add cookies if they exist
             if cookies_file_path:
                 logger.info("Using browser cookies for the request.")
                 cmd.extend(['--cookies', cookies_file_path])
