@@ -1,7 +1,9 @@
 gradio==4.44.0
 transformers==4.37.2
 torch==2.3.1
-yt-dlp>=2024.03.06
+torchvision
+torchaudio
+yt-dlp>=2024.07.25
 fastapi==0.108.0
 uvicorn==0.25.0
 python-multipart
