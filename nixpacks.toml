@@ -1,0 +1,10 @@
+# nixpacks.toml
+
+[phases.setup]
+# Install system packages that yt-dlp needs for best performance and resilience.
+# ffmpeg helps with media formats, and brotli is for browser impersonation.
+aptPkgs = ["ffmpeg", "brotli"]
+
+[start]
+# The command to run your FastAPI application.
+cmd = "uvicorn app:app --host 0.0.0.0 --port $PORT"
