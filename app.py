@@ -97,20 +97,21 @@ def process_and_summarize(youtube_url: str):
 
     try:
         # =========================================================================
-        # === THIS IS THE CORRECTED LOGIC ===
+        # === CORRECTED LOGIC FOR youtube-transcript-api ===
         # =========================================================================
-        # 1. Create a requests session with a browser-like user-agent.
-        session = requests.Session()
-        session.headers.update({
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/109.0.0.0 Safari/537.36',
-            'Accept-Language': 'en-US,en;q=0.5'
-        })
-
-        # 2. Create an *instance* of the API, passing the session to it.
-        api = YouTubeTranscriptApi(http_session=session)
-
-        # 3. Call get_transcript on the *instance*.
-        transcript_list = api.get_transcript(video_id, languages=['en'])
+        # The YouTubeTranscriptApi class methods are static, so we don't instantiate it
+        # Instead, we can set up proxies or other configurations if needed
+        
+        # For basic usage without custom session:
+        transcript_list = YouTubeTranscriptApi.get_transcript(video_id, languages=['en'])
+        
+        # Alternative approach if you need custom headers/session:
+        # You can try using proxies parameter or other available options
+        # transcript_list = YouTubeTranscriptApi.get_transcript(
+        #     video_id, 
+        #     languages=['en'],
+        #     proxies={'http': 'your_proxy', 'https': 'your_proxy'}  # if needed
+        # )
         # =========================================================================
         
         full_transcript = " ".join([item['text'] for item in transcript_list])
@@ -134,7 +135,7 @@ def process_and_summarize(youtube_url: str):
 
     final_summary = "\n\n".join([f"• {s}" for s in summaries])
     note = f"\n\n*(Note: Summary generated from the first {len(summaries)} part(s) of the video.)*" if len(chunks) > len(summaries) else ""
-    return final_summary
+    return final_summary + note
 
 # --- API Endpoint ---
 @app.post("/api/summarize/")
