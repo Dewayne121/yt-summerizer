@@ -7,5 +7,5 @@ requests
 google-generativeai==0.7.2
 brotli
 
-# Install yt-dlp with the recommended 'curl_cffi' extra for robust impersonation
+# This line is critical: it installs yt-dlp with the impersonation dependency
 yt-dlp[default,curl_cffi]>=2024.07.25
