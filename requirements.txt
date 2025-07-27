@@ -1,13 +1,10 @@
 gradio==4.44.0
 transformers==4.37.2
 torch==2.3.1
-youtube-transcript-api==0.6.2
+yt-dlp>=2024.12.13
 fastapi==0.108.0
 uvicorn==0.25.0
 python-multipart
 numpy<2.0
 pydantic
 requests
-# Add these for better error handling and debugging
-httpx>=0.24.0
-urllib3>=1.26.0
