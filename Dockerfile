@@ -6,7 +6,7 @@ FROM python:3.12-slim-bullseye
 # Set the working directory inside the container
 WORKDIR /app
 
-# Install only the essential system dependencies
+# Install only the essential system dependency for yt-dlp
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ffmpeg \
     && rm -rf /var/lib/apt/lists/*
