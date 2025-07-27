@@ -13,7 +13,7 @@ from pydantic import BaseModel
 
 # --- Setup ---
 logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
+logger = a=logging.getLogger(__name__)
 
 # --- Configure Google AI API ---
 try:
@@ -104,7 +104,6 @@ def get_transcript_with_ytdlp(youtube_url: str):
                 f.write(netscape_formatted_cookies)
         
         try:
-            # Build the definitive command
             cmd = ['yt-dlp', '--write-auto-subs', '--write-subs', '--sub-langs', 'en.*', '--sub-format', 'vtt', '--skip-download']
             
             if proxy_url:
@@ -113,7 +112,7 @@ def get_transcript_with_ytdlp(youtube_url: str):
             if cookies_file_path:
                 cmd.extend(['--cookies', cookies_file_path])
             
-            # This should now work reliably because of the new requirements file
+            # This should now work because of the Dockerfile and correct requirements.txt
             cmd.extend(['--impersonate', 'chrome110'])
 
             cmd.extend(['--output', f'{temp_dir}/%(id)s.%(ext)s', youtube_url])
@@ -135,7 +134,7 @@ def get_transcript_with_ytdlp(youtube_url: str):
             if "Sign in to confirm you’re not a bot" in e.stderr or "cookies are no longer valid" in e.stderr:
                 raise RuntimeError("Could not fetch subtitles: YouTube requires a valid login. Your provided cookies may have expired. Please refresh them.")
             if "Impersonate target" in e.stderr:
-                raise RuntimeError("A critical dependency for impersonation is missing in the server environment. Please contact support.")
+                raise RuntimeError("A critical dependency for impersonation is missing in the server environment. This is a deployment issue.")
             raise RuntimeError(f"Could not fetch subtitles. Error: {e.stderr}")
 
 def summarize_with_google_ai(transcript: str, word_count: int):
