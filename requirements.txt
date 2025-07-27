@@ -1,12 +1,8 @@
 gradio==4.44.0
-transformers==4.37.2
-torch==2.3.1
-torchvision
-torchaudio
 yt-dlp>=2024.07.25
 fastapi==0.108.0
 uvicorn==0.25.0
 python-multipart
-numpy<2.0
 pydantic
 requests
+google-generativeai==0.7.2
