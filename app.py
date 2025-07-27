@@ -31,10 +31,22 @@ except Exception as e:
     model = None
 
 # --- FastAPI App Initialization ---
-app = FastAPI(title="YouTube Summarizer API")
+app = FastAPI(title="YouTube Summarizer API", debug=True)
+
+# Add debugging middleware
+@app.middleware("http")
+async def debug_middleware(request, call_next):
+    logger.info(f"Incoming request: {request.method} {request.url.path}")
+    response = await call_next(request)
+    logger.info(f"Response status: {response.status_code}")
+    return response
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"]
+    allow_origins=["*"], 
+    allow_credentials=True, 
+    allow_methods=["*"], 
+    allow_headers=["*"]
 )
 
 class SummarizeRequest(BaseModel):
