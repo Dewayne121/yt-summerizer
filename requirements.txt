@@ -1,3 +1,4 @@
+# requirements.txt
 gradio==4.44.0
 yt-dlp>=2024.07.25
 fastapi==0.108.0
@@ -6,3 +7,4 @@ python-multipart
 pydantic
 requests
 google-generativeai==0.7.2
+brotli # Add this for impersonation
