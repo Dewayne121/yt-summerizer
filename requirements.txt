@@ -1,10 +1,11 @@
 # requirements.txt
-gradio==4.44.0
-yt-dlp>=2024.07.25
 fastapi==0.108.0
 uvicorn==0.25.0
 python-multipart
 pydantic
 requests
 google-generativeai==0.7.2
-brotli # Add this for impersonation
+brotli
+
+# Install yt-dlp with the recommended 'curl_cffi' extra for robust impersonation
+yt-dlp[default,curl_cffi]>=2024.07.25
