@@ -185,14 +185,27 @@ def get_transcript_with_ytdlp(youtube_url: str, retry_count: int = 0) -> Tuple[l
                 cmd.extend(['--output', f'{temp_dir}/%(id)s.%(ext)s', youtube_url])
 
                 logger.info(f"Trying subtitle strategy {strategy_idx + 1}/{len(subtitle_strategies)}: {strategy['sub_langs']} (attempt {retry_count + 1})...")
+                logger.info(f"Command: {' '.join(cmd)}")
+                
                 result = subprocess.run(
                     cmd, 
                     capture_output=True, 
                     text=True, 
                     timeout=120,  # Increased timeout
-                    check=True, 
+                    check=False,  # Don't raise exception on non-zero exit
                     encoding='utf-8'
                 )
+                
+                # Log the result for debugging
+                logger.info(f"yt-dlp exit code: {result.returncode}")
+                if result.stdout:
+                    logger.info(f"yt-dlp stdout: {result.stdout[:500]}...")
+                if result.stderr:
+                    logger.info(f"yt-dlp stderr: {result.stderr[:500]}...")
+                
+                # Look for any files created (not just VTT)
+                all_files = glob.glob(f"{temp_dir}/*")
+                logger.info(f"Files created in temp dir: {[os.path.basename(f) for f in all_files]}")
                 
                 # Look for any VTT files
                 vtt_files = glob.glob(f"{temp_dir}/*.vtt")
@@ -215,10 +228,19 @@ def get_transcript_with_ytdlp(youtube_url: str, retry_count: int = 0) -> Tuple[l
                 
                 # If no files found, try next strategy
                 logger.warning(f"No subtitle files found with strategy {strategy_idx + 1}, trying next...")
-                continue
                 
+                # If this failed and it's not the last strategy, continue
+                if result.returncode != 0 and strategy_idx < len(subtitle_strategies) - 1:
+                    continue
+                    
+            except subprocess.TimeoutExpired:
+                logger.error(f"Strategy {strategy_idx + 1} timed out")
+                if strategy_idx < len(subtitle_strategies) - 1:
+                    continue
+                else:
+                    raise RuntimeError("The transcript download timed out (120s).")
             except subprocess.CalledProcessError as e:
-                logger.warning(f"Strategy {strategy_idx + 1} failed: {e.stderr}")
+                logger.warning(f"Strategy {strategy_idx + 1} failed with CalledProcessError: {e.stderr}")
                 if strategy_idx < len(subtitle_strategies) - 1:
                     continue  # Try next strategy
                 else:
@@ -238,6 +260,12 @@ def get_transcript_with_ytdlp(youtube_url: str, retry_count: int = 0) -> Tuple[l
                     
                     if "Private video" in e.stderr:
                         raise RuntimeError("This video is private and cannot be accessed.")
+            except Exception as e:
+                logger.error(f"Strategy {strategy_idx + 1} failed with unexpected error: {e}")
+                if strategy_idx < len(subtitle_strategies) - 1:
+                    continue
+                else:
+                    raise RuntimeError(f"Failed to extract subtitles: {str(e)}")
         
         # If we get here, none of the strategies worked
         raise RuntimeError("No subtitles found for this video. The video may not have captions available, or they may be in a language other than English.")
@@ -274,23 +302,53 @@ def check_available_subtitles(youtube_url: str) -> dict:
     if not video_id:
         return {"error": "Invalid YouTube URL"}
     
-    with tempfile.TemporaryDirectory() as temp_dir:
-        try:
-            cmd = [
-                'yt-dlp', 
-                '--list-subs',  # List available subtitles
-                '--no-warnings',
-                youtube_url
-            ]
-            
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=30, encoding='utf-8')
-            return {
-                "video_id": video_id,
-                "available_subtitles": result.stdout,
-                "stderr": result.stderr
-            }
-        except Exception as e:
-            return {"error": f"Failed to check subtitles: {str(e)}"}
+    try:
+        # First, try to list available subtitles
+        cmd = [
+            'yt-dlp', 
+            '--list-subs',
+            '--no-warnings',
+            youtube_url
+        ]
+        
+        list_result = subprocess.run(cmd, capture_output=True, text=True, timeout=30, encoding='utf-8')
+        
+        # Then try to get basic video info
+        info_cmd = [
+            'yt-dlp',
+            '--dump-json',
+            '--no-warnings',
+            youtube_url
+        ]
+        
+        info_result = subprocess.run(info_cmd, capture_output=True, text=True, timeout=30, encoding='utf-8')
+        
+        video_info = {}
+        if info_result.returncode == 0:
+            try:
+                video_data = json.loads(info_result.stdout)
+                video_info = {
+                    "title": video_data.get("title", "Unknown"),
+                    "duration": video_data.get("duration", "Unknown"),
+                    "uploader": video_data.get("uploader", "Unknown"),
+                    "has_subtitles": bool(video_data.get("subtitles", {})),
+                    "has_automatic_captions": bool(video_data.get("automatic_captions", {})),
+                    "available_subtitle_languages": list(video_data.get("subtitles", {}).keys()) if video_data.get("subtitles") else [],
+                    "available_auto_caption_languages": list(video_data.get("automatic_captions", {}).keys()) if video_data.get("automatic_captions") else []
+                }
+            except json.JSONDecodeError:
+                video_info = {"error": "Could not parse video info"}
+        
+        return {
+            "video_id": video_id,
+            "video_info": video_info,
+            "list_subs_output": list_result.stdout,
+            "list_subs_stderr": list_result.stderr,
+            "list_subs_returncode": list_result.returncode,
+            "info_stderr": info_result.stderr if info_result.returncode != 0 else None
+        }
+    except Exception as e:
+        return {"error": f"Failed to check subtitles: {str(e)}"}
 
 # --- Route Definitions ---
 @app.get("/")
