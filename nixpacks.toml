@@ -1,0 +1,9 @@
+# nixpacks.toml
+
+[phases.setup]
+# Install the most essential system package for yt-dlp
+aptPkgs = ["ffmpeg"]
+
+[start]
+# This command is now set in the Railway UI, but it's good practice to have it here.
+cmd = "uvicorn app:app --host 0.0.0.0 --port 8080"
