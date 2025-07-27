@@ -2,8 +2,8 @@
 
 [phases.setup]
 # Install system packages that yt-dlp needs for best performance and resilience.
-# ffmpeg helps with media formats, and brotli is for browser impersonation.
-aptPkgs = ["ffmpeg", "brotli"]
+# openssl & ca-certificates are crucial for TLS/SSL fingerprinting used in impersonation.
+aptPkgs = ["ffmpeg", "brotli", "openssl", "ca-certificates"]
 
 [start]
 # The command to run your FastAPI application.
