@@ -37,6 +37,7 @@ app.add_middleware(
 class SummarizeRequest(BaseModel):
     youtube_url: str
 
+# --- Helper function to convert JSON cookies to Netscape format ---
 def convert_json_to_netscape(json_cookies_str: str) -> str:
     try:
         cookies = json.loads(json_cookies_str)
@@ -56,6 +57,40 @@ def convert_json_to_netscape(json_cookies_str: str) -> str:
             netscape_lines.append("\t".join([domain, include_subdomains, path, secure, expires, name, value]))
     return "\n".join(netscape_lines)
 
+# --- CORRECTED: The missing function is now restored ---
+def get_video_id(url: str):
+    """Extracts the YouTube video ID from a URL."""
+    patterns = [
+        r'(?:https?:\/\/)?(?:www\.)?youtube\.com\/watch\?v=([a-zA-Z0-9_-]{11})',
+        r'(?:https?:\/\/)?youtu\.be\/([a-zA-Z0-9_-]{11})'
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, url.strip())
+        if match: return match.group(1)
+    return None
+# --- END CORRECTION ---
+
+def parse_vtt_to_structured_transcript(vtt_content: str):
+    lines = vtt_content.strip().split('\n')
+    structured_transcript = []
+    full_text_lines = []
+    for i, line in enumerate(lines):
+        if '-->' in line:
+            try:
+                start_time = line.split('-->')[0].strip().split('.')[0]
+                text_parts = []
+                j = i + 1
+                while j < len(lines) and lines[j].strip() != '':
+                    cleaned_line = re.sub(r'<[^>]+>', '', lines[j])
+                    text_parts.append(cleaned_line.strip())
+                    j += 1
+                current_text = " ".join(text_parts)
+                if start_time and current_text and (not structured_transcript or structured_transcript[-1]['text'] != current_text):
+                    structured_transcript.append({"time": start_time, "text": current_text})
+                    full_text_lines.append(current_text)
+            except IndexError: continue
+    plain_text = " ".join(full_text_lines)
+    return structured_transcript, plain_text
 
 def get_transcript_with_ytdlp(youtube_url: str):
     video_id = get_video_id(youtube_url)
@@ -72,24 +107,19 @@ def get_transcript_with_ytdlp(youtube_url: str):
                 f.write(netscape_formatted_cookies)
             logger.info("Successfully created Netscape cookies.txt file.")
 
-        # --- MODIFIED: Create a base command and then try two different strategies ---
         base_cmd = ['yt-dlp', '--write-auto-subs', '--write-subs', '--sub-langs', 'en.*', '--sub-format', 'vtt', '--skip-download']
         if cookies_file_path:
             base_cmd.extend(['--cookies', cookies_file_path])
         base_cmd.extend(['--output', f'{temp_dir}/%(id)s.%(ext)s', youtube_url])
 
-        # Strategy 1: Gold Standard (Impersonate + Cookies)
         cmd_with_impersonate = base_cmd + ['--impersonate', 'chrome110']
         
         try:
             logger.info("Attempting transcript fetch with impersonation...")
             result = subprocess.run(cmd_with_impersonate, capture_output=True, text=True, timeout=90, check=True, encoding='utf-8')
         except subprocess.CalledProcessError as e:
-            # Check if the error is specifically about impersonation failing
             if "Impersonate target" in e.stderr and "is not available" in e.stderr:
                 logger.warning("Impersonation failed. Retrying without impersonation (cookies only)...")
-                
-                # Strategy 2: Silver Standard (Cookies only) - Fallback
                 cmd_without_impersonate = base_cmd
                 try:
                     result = subprocess.run(cmd_without_impersonate, capture_output=True, text=True, timeout=90, check=True, encoding='utf-8')
@@ -97,10 +127,8 @@ def get_transcript_with_ytdlp(youtube_url: str):
                     logger.error(f"yt-dlp failed on second attempt (no impersonation): {e2.stderr}")
                     raise RuntimeError(f"Could not fetch subtitles even after retry. Error: {e2.stderr}")
             else:
-                # The error was something else (like 429), so we raise it
                 logger.error(f"yt-dlp failed with a non-impersonation error: {e.stderr}")
                 raise RuntimeError(f"Could not fetch subtitles. Error: {e.stderr}")
-        # --- END MODIFICATION ---
         except subprocess.TimeoutExpired:
             raise RuntimeError("The transcript download timed out (90s). The video may be exceptionally long.")
 
@@ -112,7 +140,6 @@ def get_transcript_with_ytdlp(youtube_url: str):
         return parse_vtt_to_structured_transcript(vtt_content)
 
 def summarize_with_google_ai(transcript: str, word_count: int):
-    # This function is unchanged
     if not model: raise RuntimeError("AI model is not available due to a configuration error.")
     prompt = f"""As an expert analyst, provide a comprehensive summary of the following video transcript. Format your output in Markdown with two distinct sections: ## Quick Summary\nA concise paragraph capturing the main point and conclusion. ## Key Takeaways\nA bulleted list of the 4-6 most important points. --- Transcript: "{transcript}" """
     try:
@@ -124,7 +151,6 @@ def summarize_with_google_ai(transcript: str, word_count: int):
 
 @app.post("/api/summarize/")
 async def api_summarize(request: SummarizeRequest):
-    # This function is unchanged
     try:
         structured_transcript, plain_text = get_transcript_with_ytdlp(request.youtube_url)
         word_count = len(plain_text.split())
