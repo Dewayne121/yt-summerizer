@@ -21,7 +21,7 @@ is_model_loading = False
 
 # --- Model Loading Logic ---
 def load_model_proc():
-    """Loads the model in a background thread, trying faster models first."""
+    """Loads the model in a background thread, using a fast default."""
     global summarizer, model_load_error, is_model_loading
     if summarizer or is_model_loading:
         return
@@ -29,8 +29,7 @@ def load_model_proc():
     logger.info("Background thread: Starting model loading...")
     
     try:
-        # Use a smaller, faster model by default for better performance on CPU
-        model_name = os.getenv("MODEL_NAME", "sshleifer/distilbart-cnn-6-6")
+        model_name = os.getenv("MODEL_NAME", "sshleifer/distilbart-cnn-6-6") # Smaller, faster model
         summarizer = pipeline("summarization", model=model_name, device=-1)
         logger.info(f"Background thread: Model '{model_name}' loaded successfully.")
     except Exception as e:
@@ -44,7 +43,6 @@ app = FastAPI(title="YouTube Video Summarizer API")
 
 @app.on_event("startup")
 def startup_event():
-    """Starts the model download in a separate thread so it doesn't block the server."""
     thread = threading.Thread(target=load_model_proc)
     thread.start()
 
@@ -54,15 +52,6 @@ app.add_middleware(
 )
 
 # --- Core Logic Functions ---
-def get_video_id(url: str):
-    if not url: return None
-    patterns = [r'v=([a-zA-Z0-9_-]{11})', r'be\/([a-zA-Z0-9_-]{11})']
-    for pattern in patterns:
-        match = re.search(pattern, url)
-        if match:
-            return match.group(1)
-    return None
-
 def get_transcript_with_ytdlp(youtube_url: str):
     """More reliable transcript fetching using yt-dlp."""
     with tempfile.TemporaryDirectory() as temp_dir:
@@ -76,14 +65,13 @@ def get_transcript_with_ytdlp(youtube_url: str):
             '--output', f'{temp_dir}/%(id)s.%(ext)s',
             youtube_url
         ]
-        
         proc = subprocess.run(cmd, capture_output=True, text=True, timeout=45)
         
         if proc.returncode != 0:
             error_message = proc.stderr.strip()
             logger.error(f"yt-dlp failed: {error_message}")
             if "copyright" in error_message.lower():
-                raise RuntimeError("Failed to fetch transcript due to a copyright claim on the video.")
+                raise RuntimeError("Failed to fetch transcript due to a copyright claim.")
             if "private video" in error_message.lower():
                  raise RuntimeError("Failed to fetch transcript. The video is private.")
             raise RuntimeError("yt-dlp failed. The video may be unavailable or have no English captions.")
@@ -95,60 +83,66 @@ def get_transcript_with_ytdlp(youtube_url: str):
         with open(vtt_files[0], 'r', encoding='utf-8') as f:
             lines = f.read().splitlines()
 
-        # Simple but effective VTT parsing
         text_lines = [line for line in lines if line and '-->' not in line and 'WEBVTT' not in line]
         transcript = ' '.join(text_lines)
         
-        if len(transcript.split()) < 30:
-            raise ValueError("Transcript is too short to summarize.")
+        if len(transcript.split()) < 50: # Increased threshold
+            raise ValueError("Transcript is too short to provide a quality summary.")
             
         return transcript
 
-def create_extractive_summary(text, num_sentences=8):
-    """Creates a fast summary by picking the most important sentences."""
-    sentences = re.split(r'(?<=[.!?])\s+', text)
-    if not sentences: return "Could not generate a quick summary."
-    
-    # Very simple scoring: longer sentences are more important
-    scored_sentences = sorted([(len(s.split()), s) for s in sentences if len(s.split()) > 5], reverse=True)
-    
-    top_sentences = [s for _, s in scored_sentences[:num_sentences]]
-    
-    # Reorder them to appear as they did in the original text
-    summary_sentences = [s for s in sentences if s in top_sentences]
-    
-    return ' '.join(summary_sentences)
+# =========================================================================
+# === NEW & ENHANCED AI FUNCTIONS ===
+# =========================================================================
 
-def generate_ai_summary(text, progress):
-    """Generates the high-quality abstractive summary."""
-    if not summarizer:
-        return "\n\n**Note:** AI model is not loaded, so a deep summary could not be generated."
-
-    words = text.split()
-    # For performance, only use the first ~1500 words for the AI summary on a CPU
-    text_to_summarize = " ".join(words[:1500])
+def generate_ai_overview(intro_text, conclusion_text, progress):
+    """Generates a high-level overview by summarizing the beginning and end."""
+    if not summarizer: return "AI model not loaded."
     
-    num_chunks = min(3, (len(text_to_summarize.split()) // 400) + 1)
-    chunk_size = len(text_to_summarize.split()) // num_chunks
-    chunks = [" ".join(text_to_summarize.split()[i:i+chunk_size]) for i in range(0, len(text_to_summarize.split()), chunk_size)]
+    progress(0.5, desc="AI is generating the overview...")
+    
+    # Combine intro and conclusion for a holistic summary
+    combined_text = f"Introduction: {intro_text} [...] Conclusion: {conclusion_text}"
+    
+    try:
+        overview = summarizer(combined_text, max_length=100, min_length=25, do_sample=False)[0]['summary_text']
+        return overview
+    except Exception as e:
+        logger.error(f"Error during AI overview generation: {e}")
+        return "Could not generate AI overview for this section."
 
-    summaries = []
-    for i, chunk in enumerate(chunks[:3]): # Max 3 chunks
-        progress(0.6 + (i / len(chunks) * 0.4), desc=f"AI is processing section {i+1}/{len(chunks)}...")
-        try:
-            summary = summarizer(chunk, max_length=120, min_length=25, do_sample=False)[0]['summary_text']
-            summaries.append(summary)
-        except Exception as e:
-            logger.error(f"Error summarizing chunk {i}: {e}")
-            summaries.append(f"(AI processing failed for this section.)")
-            
-    return "\n".join(f"• {s.strip()}" for s in summaries)
+def generate_ai_recap(middle_text, progress):
+    """Generates a detailed recap by summarizing the core content of the video."""
+    if not summarizer: return ["AI model not loaded."]
 
+    progress(0.75, desc="AI is recapping key moments...")
+    
+    # Split the middle part into 2 chunks for more detail
+    words = middle_text.split()
+    midpoint = len(words) // 2
+    chunk1 = " ".join(words[:midpoint])
+    chunk2 = " ".join(words[midpoint:])
+    
+    recap_points = []
+    try:
+        # Summarize each chunk of the middle section
+        recap1 = summarizer(chunk1, max_length=120, min_length=20, do_sample=False)[0]['summary_text']
+        recap_points.append(recap1)
+        
+        progress(0.9, desc="AI is recapping final moments...")
+        recap2 = summarizer(chunk2, max_length=120, min_length=20, do_sample=False)[0]['summary_text']
+        recap_points.append(recap2)
+        
+    except Exception as e:
+        logger.error(f"Error during AI recap generation: {e}")
+        recap_points.append("Could not generate AI recap for a section.")
+        
+    return recap_points
 
 # --- Gradio Interface ---
 with gr.Blocks(title="YouTube Video Summarizer", theme=gr.themes.Soft()) as gradio_interface:
     gr.Markdown("# 📺 YouTube Video Summarizer")
-    gr.Markdown("Get a near-instant quick summary, followed by a deeper AI-generated summary.")
+    gr.Markdown("Get a high-quality, structured AI summary of any YouTube video with captions.")
     
     status_display = gr.Markdown("Model status: Unknown")
 
@@ -165,9 +159,8 @@ with gr.Blocks(title="YouTube Video Summarizer", theme=gr.themes.Soft()) as grad
         return "⏳ **Model Status:** Initializing..."
 
     def gradio_summarize_wrapper(youtube_url: str, progress=gr.Progress(track_tqdm=True)):
-        """Orchestrates the new two-stage summary process with a progress bar."""
+        """Orchestrates the new structured summary process."""
         try:
-            # === STAGE 1: Fast Transcript & Extractive Summary ===
             progress(0, desc="Contacting YouTube...")
             if not youtube_url:
                 raise ValueError("Please enter a YouTube URL.")
@@ -175,19 +168,39 @@ with gr.Blocks(title="YouTube Video Summarizer", theme=gr.themes.Soft()) as grad
             progress(0.1, desc="Fetching Transcript with yt-dlp...")
             transcript = get_transcript_with_ytdlp(youtube_url)
             
-            progress(0.4, desc="Generating Quick Summary...")
-            quick_summary = create_extractive_summary(transcript)
+            # --- Text Segmentation for Themed Summarization ---
+            progress(0.4, desc="Analyzing transcript structure...")
+            words = transcript.split()
+            word_count = len(words)
             
-            # YIELD the first, fast result to the UI
-            yield f"## 📝 **Quick Summary (Instant)**\n\n{quick_summary}"
+            # Define sections of the transcript (handle short videos gracefully)
+            intro_word_count = min(300, int(word_count * 0.2))
+            conclusion_word_count = min(350, int(word_count * 0.25))
+            
+            intro_text = " ".join(words[:intro_word_count])
+            conclusion_text = " ".join(words[-conclusion_word_count:])
+            
+            # The middle is what's left over
+            middle_text = " ".join(words[intro_word_count:-conclusion_word_count])
+            
+            # --- AI Generation Stage ---
+            overview = generate_ai_overview(intro_text, conclusion_text, progress)
+            recap_points = generate_ai_recap(middle_text, progress)
 
-            # === STAGE 2: Slow, High-Quality AI Summary ===
-            progress(0.6, desc="Starting Deep AI Analysis...")
-            ai_summary_points = generate_ai_summary(transcript, progress)
-            
-            # YIELD the final, combined result
+            # --- Final Formatting ---
             progress(1.0, desc="Done!")
-            yield f"## 📝 **Quick Summary**\n\n{quick_summary}\n\n---\n\n## 🤖 **Deep AI Summary**\n\n{ai_summary_points}"
+
+            final_output = f"## 📖 AI Overview\n\n"
+            final_output += f"*{overview}*\n\n"
+            final_output += "---\n\n"
+            final_output += "## 🎬 AI Recap of Key Moments\n\n"
+            
+            for point in recap_points:
+                final_output += f"• **{point}**\n\n"
+            
+            final_output += f"\n---\n*Analysis based on a transcript of {word_count:,} words.*"
+
+            yield final_output
 
         except Exception as e:
             logger.error(f"Summarization failed: {e}", exc_info=True)
