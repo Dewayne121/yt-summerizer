@@ -4,6 +4,7 @@ import logging
 import subprocess
 import tempfile
 import glob
+import json
 import google.generativeai as genai
 from fastapi import FastAPI
 from fastapi.responses import JSONResponse
@@ -14,25 +15,20 @@ from pydantic import BaseModel
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# --- Configure the Google AI API ---
+# --- Configure Google AI API ---
 try:
     GOOGLE_API_KEY = os.getenv('GOOGLE_API_KEY')
     if not GOOGLE_API_KEY:
-        raise ValueError("GOOGLE_API_KEY environment variable not found.")
+        raise ValueError("CRITICAL: GOOGLE_API_KEY environment variable not found.")
     genai.configure(api_key=GOOGLE_API_KEY)
-    # Using a fast and capable model from the Gemini family
     model = genai.GenerativeModel('gemini-1.5-flash-latest')
     logger.info("Google AI SDK configured successfully.")
 except Exception as e:
     logger.error(f"FATAL: Failed to configure Google AI SDK: {e}", exc_info=True)
-    model = None # Ensure model is None if configuration fails
+    model = None
 
 # --- FastAPI App Initialization ---
-app = FastAPI(
-    title="YouTube Video Summarizer API",
-    description="A high-speed API for summarizing YouTube videos using Google's Gemini."
-)
-
+app = FastAPI(title="YouTube Summarizer API")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"]
@@ -43,27 +39,55 @@ class SummarizeRequest(BaseModel):
 
 # --- Core Logic Functions ---
 def get_video_id(url: str):
-    if not url: return None
     patterns = [
         r'(?:https?:\/\/)?(?:www\.)?youtube\.com\/watch\?v=([a-zA-Z0-9_-]{11})',
-        r'(?:https?:\/\/)?(?:www\.)?youtu\.be\/([a-zA-Z0-9_-]{11})',
+        r'(?:https?:\/\/)?youtu\.be\/([a-zA-Z0-9_-]{11})'
     ]
     for pattern in patterns:
         match = re.search(pattern, url.strip())
-        if match: return match.group(1)
+        if match:
+            return match.group(1)
     return None
 
-def parse_vtt_content(vtt_content):
-    lines = vtt_content.split('\n')
-    text_lines = []
-    for line in lines:
-        line = line.strip()
-        if (line.startswith('WEBVTT') or '-->' in line or not line or line.isdigit()):
-            continue
-        line = re.sub(r'<[^>]+>', '', line)
-        if line:
-            text_lines.append(line)
-    return ' '.join(text_lines)
+def parse_vtt_to_structured_transcript(vtt_content: str):
+    """
+    Parses VTT content into a list of dictionaries with start time and text.
+    Also returns the full plain text for summarization.
+    """
+    lines = vtt_content.strip().split('\n')
+    structured_transcript = []
+    full_text_lines = []
+    current_text = ""
+    start_time = ""
+
+    for i, line in enumerate(lines):
+        if '-->' in line:
+            try:
+                # Capture the start time from the timestamp line
+                start_time = line.split('-->')[0].strip().split('.')[0] # Get time before milliseconds
+                # The actual text is on the next line(s)
+                text_parts = []
+                j = i + 1
+                while j < len(lines) and lines[j].strip() != '':
+                    # Remove HTML-like tags from captions
+                    cleaned_line = re.sub(r'<[^>]+>', '', lines[j])
+                    text_parts.append(cleaned_line.strip())
+                    j += 1
+                
+                current_text = " ".join(text_parts)
+                
+                if start_time and current_text:
+                    # Avoid adding duplicate entries from multi-line captions
+                    if not structured_transcript or structured_transcript[-1]['text'] != current_text:
+                        structured_transcript.append({"time": start_time, "text": current_text})
+                        full_text_lines.append(current_text)
+
+            except IndexError:
+                continue # Skip malformed timestamp lines
+                
+    plain_text = " ".join(full_text_lines)
+    return structured_transcript, plain_text
+
 
 def get_transcript_with_ytdlp(youtube_url: str):
     video_id = get_video_id(youtube_url)
@@ -72,100 +96,67 @@ def get_transcript_with_ytdlp(youtube_url: str):
 
     with tempfile.TemporaryDirectory() as temp_dir:
         try:
-            cmd = [
-                'yt-dlp', '--write-auto-subs', '--write-subs', '--sub-langs', 'en.*',
-                '--sub-format', 'vtt', '--skip-download',
-                '--output', f'{temp_dir}/%(id)s.%(ext)s', youtube_url
-            ]
-            logger.info(f"Running yt-dlp command: {' '.join(cmd)}")
+            cmd = ['yt-dlp', '--write-auto-subs', '--write-subs', '--sub-langs', 'en.*', '--sub-format', 'vtt', '--skip-download', '--output', f'{temp_dir}/%(id)s.%(ext)s', youtube_url]
             result = subprocess.run(cmd, capture_output=True, text=True, timeout=60, check=True, encoding='utf-8')
-            
             vtt_files = glob.glob(f"{temp_dir}/*.vtt")
             if not vtt_files:
                 raise RuntimeError("No English subtitles were found for this video.")
-            
             with open(vtt_files[0], 'r', encoding='utf-8') as f:
                 vtt_content = f.read()
-
-            transcript_text = parse_vtt_content(vtt_content)
-            if not transcript_text or len(transcript_text.split()) < 50:
-                raise RuntimeError("The extracted transcript is too short to be summarized.")
-            
-            # Truncate very long transcripts to fit within API limits and keep costs low
-            max_words = 15000
-            words = transcript_text.split()
-            if len(words) > max_words:
-                transcript_text = " ".join(words[:max_words])
-                logger.warning(f"Transcript truncated to {max_words} words.")
-
-            return transcript_text
-
+            return parse_vtt_to_structured_transcript(vtt_content)
         except subprocess.TimeoutExpired:
-            raise RuntimeError("The transcript download timed out. The video might be too long or the connection slow.")
+            raise RuntimeError("The transcript download timed out.")
         except subprocess.CalledProcessError as e:
-            logger.error(f"yt-dlp failed: {e.stderr}")
-            raise RuntimeError(f"Could not fetch subtitles. The video may not have them or they are in an unsupported format.")
+            raise RuntimeError(f"Could not fetch subtitles: {e.stderr}")
 
 def summarize_with_google_ai(transcript: str, word_count: int):
-    """
-    Generates a summary using the Google Gemini API.
-    """
     if not model:
-        raise RuntimeError("The AI model is not available due to a configuration error. Check the server logs.")
+        raise RuntimeError("AI model is not available due to a configuration error.")
 
-    # A more detailed prompt for higher quality summaries
     prompt = f"""
-    As an expert analyst, your task is to provide a comprehensive summary of the following video transcript.
-
+    As an expert analyst, provide a comprehensive summary of the following video transcript.
     Format your output in Markdown with two distinct sections:
-
-    ## ⚡ Quick Summary
-    A single, concise paragraph that captures the main point and conclusion of the video.
-
-    ## 🔑 Key Takeaways
-    A bulleted list of the 4-6 most important points, findings, or arguments from the transcript. Each point should be clear and easy to understand.
-
+    
+    ## Quick Summary
+    A concise paragraph capturing the main point and conclusion.
+    
+    ## Key Takeaways
+    A bulleted list of the 4-6 most important points.
+    
     ---
-
-    **Transcript to Summarize:**
-    "{transcript}"
+    Transcript: "{transcript}"
     """
-
     try:
-        logger.info("Sending request to Google Gemini API...")
         response = model.generate_content(prompt)
-        # Add a footer to the response
-        summary_markdown = response.text + f"\n\n*📊 AI analysis powered by Google Gemini. Processed approximately {word_count:,} words.*"
+        summary_markdown = response.text + f"\n\n*AI analysis powered by Google Gemini. Processed approximately {word_count:,} words.*"
         return summary_markdown
     except Exception as e:
-        logger.error(f"Google Gemini API call failed: {e}", exc_info=True)
-        raise RuntimeError(f"The AI summarization failed. The service may be temporarily unavailable. Error: {e}")
+        raise RuntimeError(f"The AI summarization failed. Error: {e}")
 
-# --- API Endpoint ---
 @app.post("/api/summarize/")
 async def api_summarize(request: SummarizeRequest):
-    """
-    The main API endpoint that receives a URL, gets the transcript, and returns an AI summary.
-    """
     try:
-        logger.info(f"Processing request for URL: {request.youtube_url}")
+        structured_transcript, plain_text = get_transcript_with_ytdlp(request.youtube_url)
+        word_count = len(plain_text.split())
         
-        # Step 1: Get transcript (fast)
-        transcript = get_transcript_with_ytdlp(request.youtube_url)
-        word_count = len(transcript.split())
-        logger.info(f"Transcript fetched successfully with {word_count} words.")
+        if word_count < 50:
+             return JSONResponse(
+                content={
+                    "summary": "This video is too short to summarize.", 
+                    "transcript": structured_transcript
+                }
+            )
+
+        summary_markdown = summarize_with_google_ai(plain_text, word_count)
         
-        # Step 2: Generate summary with Google AI (very fast)
-        summary_markdown = summarize_with_google_ai(transcript, word_count)
-        logger.info("Summary generated successfully.")
-        
-        return JSONResponse(content={"summary": summary_markdown})
-    
+        return JSONResponse(
+            content={
+                "summary": summary_markdown, 
+                "transcript": structured_transcript
+            }
+        )
     except (ValueError, RuntimeError) as e:
-        # User-facing errors (e.g., bad URL, no subtitles)
-        logger.warning(f"Handled error for user: {str(e)}")
         return JSONResponse(status_code=400, content={"error": str(e)})
     except Exception as e:
-        # Server-side errors
         logger.error(f"An unexpected internal error occurred: {e}", exc_info=True)
-        return JSONResponse(status_code=500, content={"error": "An internal server error occurred. Please try again later."})
+        return JSONResponse(status_code=500, content={"error": "An internal server error occurred."})
