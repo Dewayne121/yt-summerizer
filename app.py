@@ -191,29 +191,57 @@ def get_transcript_with_ytdlp(youtube_url: str):
             logger.error(f"Error in get_transcript_with_ytdlp: {e}", exc_info=True)
             raise
 
-def create_extractive_summary(text, num_sentences=6):
-    """Create a fast extractive summary by selecting key sentences."""
+def create_extractive_summary(text, num_sentences=10):
+    """Create a fast extractive summary by selecting key sentences with better formatting."""
     sentences = text.replace('!', '.').replace('?', '.').split('.')
     sentences = [s.strip() for s in sentences if s.strip() and len(s.strip()) > 20]
     
     if len(sentences) <= num_sentences:
         return ' '.join(sentences)
     
-    # Simple scoring: prefer sentences with common keywords
-    important_words = ['important', 'key', 'main', 'first', 'second', 'finally', 'conclusion', 'result', 'because', 'therefore', 'however', 'moreover', 'furthermore']
+    # Enhanced scoring: prefer sentences with common keywords and better structure
+    important_words = [
+        'important', 'key', 'main', 'first', 'second', 'third', 'finally', 'conclusion', 
+        'result', 'because', 'therefore', 'however', 'moreover', 'furthermore', 'essentially',
+        'basically', 'specifically', 'particularly', 'especially', 'according', 'studies',
+        'research', 'found', 'shows', 'indicates', 'suggests', 'explains', 'means',
+        'example', 'instance', 'such as', 'including', 'problem', 'solution', 'issue',
+        'benefit', 'advantage', 'disadvantage', 'effect', 'impact', 'influence'
+    ]
     
     scored_sentences = []
     for sentence in sentences:
         score = 0
         words = sentence.lower().split()
-        # Score based on length (not too short, not too long)
-        if 10 <= len(words) <= 30:
+        
+        # Score based on length (prefer medium-length sentences)
+        if 8 <= len(words) <= 25:
+            score += 3
+        elif 25 < len(words) <= 35:
             score += 2
+        elif len(words) > 35:
+            score += 1
+        
         # Score based on important words
-        score += sum(1 for word in important_words if word in sentence.lower())
+        for important_word in important_words:
+            if important_word in sentence.lower():
+                score += 2
+        
         # Score based on position (beginning and end are often important)
         pos = sentences.index(sentence)
-        if pos < len(sentences) * 0.2 or pos > len(sentences) * 0.8:
+        if pos < len(sentences) * 0.15:  # First 15%
+            score += 3
+        elif pos > len(sentences) * 0.85:  # Last 15%
+            score += 2
+        elif 0.4 <= pos/len(sentences) <= 0.6:  # Middle section
+            score += 1
+        
+        # Boost sentences with numbers or statistics
+        if any(char.isdigit() for char in sentence):
+            score += 1
+        
+        # Boost sentences with quotes or direct speech
+        if '"' in sentence or "'" in sentence:
             score += 1
         
         scored_sentences.append((score, sentence))
@@ -222,7 +250,7 @@ def create_extractive_summary(text, num_sentences=6):
     scored_sentences.sort(reverse=True, key=lambda x: x[0])
     selected = [sentence for score, sentence in scored_sentences[:num_sentences]]
     
-    # Reorder selected sentences by their original position
+    # Reorder selected sentences by their original position for coherence
     ordered_summary = []
     for sentence in sentences:
         if sentence in selected:
@@ -230,18 +258,55 @@ def create_extractive_summary(text, num_sentences=6):
     
     return '. '.join(ordered_summary) + '.'
 
-def summarize_with_timeout(summarizer, chunk, timeout_seconds=30):
+def format_ai_summary(summaries, total_words):
+    """Format AI-generated summaries with better styling and structure."""
+    formatted_summary = "## 🤖 **AI-Generated Summary**\n\n"
+    
+    if len(summaries) == 1:
+        formatted_summary += f"**Key Points:**\n\n• {summaries[0]}\n\n"
+    else:
+        for i, summary in enumerate(summaries, 1):
+            if i == 1:
+                formatted_summary += f"**Part {i} - Opening/Introduction:**\n• {summary}\n\n"
+            elif i == len(summaries):
+                formatted_summary += f"**Part {i} - Conclusion/Key Takeaways:**\n• {summary}\n\n"
+            else:
+                formatted_summary += f"**Part {i} - Main Content:**\n• {summary}\n\n"
+    
+    formatted_summary += f"*📊 Analysis: Processed {total_words:,} words using advanced AI language models*"
+    return formatted_summary
+
+def format_extractive_summary(summary, total_words):
+    """Format extractive summary with better styling."""
+    # Split into logical sections
+    sentences = [s.strip() + '.' for s in summary.split('.') if s.strip()]
+    
+    formatted_summary = "## 📝 **Quick Summary**\n\n"
+    formatted_summary += "**Main Points:**\n\n"
+    
+    for i, sentence in enumerate(sentences[:6], 1):  # Limit to 6 main points
+        if sentence.strip():
+            formatted_summary += f"**{i}.** {sentence}\n\n"
+    
+    if len(sentences) > 6:
+        formatted_summary += "**Additional Context:**\n\n"
+        for sentence in sentences[6:]:
+            if sentence.strip():
+                formatted_summary += f"• {sentence}\n\n"
+    
+    formatted_summary += f"*⚡ Fast Summary: Extracted key information from {total_words:,} words*"
+    return formatted_summary
+
+def summarize_with_timeout(summarizer, chunk, timeout_seconds=45):
     """Summarize a chunk with a timeout to prevent hanging."""
     def summarize_chunk():
         return summarizer(
             chunk, 
-            max_length=80,
-            min_length=15,
+            max_length=120,  # Increased for better summaries
+            min_length=25,   # Increased minimum
             do_sample=False,
             truncation=True,
-            # Fixed parameters for greedy decoding (num_beams=1)
             pad_token_id=summarizer.tokenizer.eos_token_id,
-            # Remove conflicting parameters
         )[0]['summary_text']
     
     with ThreadPoolExecutor(max_workers=1) as executor:
@@ -271,61 +336,73 @@ def process_and_summarize(youtube_url: str):
     if len(full_transcript.split()) < 50:
         raise ValueError("Transcript is too short to generate a meaningful summary.")
 
-    # SPEED OPTIMIZATION 1: Reduce transcript size intelligently
+    # Enhanced text processing for better summaries
     words = full_transcript.split()
+    original_word_count = len(words)
     
-    # If transcript is very long, take strategic samples instead of processing everything
-    if len(words) > 2000:
-        # Take beginning, middle, and end sections
+    # Smart sampling strategy based on video length
+    if len(words) > 3000:
+        # For very long videos: take more strategic samples
+        beginning = words[:800]
+        quarter = words[len(words)//4:len(words)//4 + 600]
+        middle = words[len(words)//2 - 400:len(words)//2 + 400]  
+        three_quarter = words[3*len(words)//4:3*len(words)//4 + 600]
+        end = words[-800:]
+        words = beginning + quarter + middle + three_quarter + end
+        logger.info(f"Very long transcript detected. Using comprehensive sampling: {len(words)} words from {original_word_count}")
+    elif len(words) > 1500:
+        # For medium videos: standard sampling
         beginning = words[:600]
-        middle_start = len(words) // 2 - 300
-        middle = words[middle_start:middle_start + 600]
+        middle = words[len(words)//2 - 400:len(words)//2 + 400]
         end = words[-600:]
         words = beginning + middle + end
-        logger.info(f"Large transcript detected. Using strategic sampling: {len(words)} words")
+        logger.info(f"Medium transcript detected. Using strategic sampling: {len(words)} words from {original_word_count}")
     
     sampled_text = " ".join(words)
     
-    # Try AI summarization with timeout protection
+    # Try AI summarization with improved parameters
     try:
-        logger.info("Starting AI summarization with timeout protection...")
+        logger.info("Starting enhanced AI summarization...")
         
-        # SPEED OPTIMIZATION 2: Use smaller, faster chunks
-        chunk_size = 300  # Small chunks for speed
+        # Dynamic chunk sizing based on content length
+        if len(words) > 2000:
+            chunk_size = 500
+            max_chunks = 3
+        elif len(words) > 1000:
+            chunk_size = 400  
+            max_chunks = 3
+        else:
+            chunk_size = 300
+            max_chunks = 2
+        
         chunks = [" ".join(words[i:i + chunk_size]) for i in range(0, len(words), chunk_size)]
-        
-        # SPEED OPTIMIZATION 3: Process only 1-2 chunks maximum
-        max_chunks = min(2, len(chunks))
+        chunks_to_process = min(max_chunks, len(chunks))
         
         summaries = []
-        for i, chunk in enumerate(chunks[:max_chunks]):
-            logger.info(f"AI Summarizing chunk {i+1}/{max_chunks} with 30-second timeout")
+        for i, chunk in enumerate(chunks[:chunks_to_process]):
+            logger.info(f"AI Summarizing section {i+1}/{chunks_to_process} with 45-second timeout")
             
-            # Use timeout-protected summarization
-            summary = summarize_with_timeout(summarizer, chunk, timeout_seconds=30)
+            # Use timeout-protected summarization with better parameters
+            summary = summarize_with_timeout(summarizer, chunk, timeout_seconds=45)
             
             if summary is None:
-                logger.warning(f"Chunk {i+1} timed out, switching to extractive method")
+                logger.warning(f"Section {i+1} timed out, switching to extractive method")
                 break
             
             summaries.append(summary)
-            logger.info(f"AI chunk {i+1} completed successfully")
+            logger.info(f"AI section {i+1} completed successfully")
         
-        # If we got at least one AI summary, use it
+        # If we got AI summaries, format them nicely
         if summaries:
-            final_summary = "\n\n".join([f"• {s}" for s in summaries])
-            total_words_processed = len(words)
-            note = f"\n\n*(AI-generated summary from {total_words_processed} words using advanced language model.)*"
-            return final_summary + note
+            return format_ai_summary(summaries, len(words))
             
     except Exception as e:
         logger.warning(f"AI summarization failed: {e}")
     
-    # FALLBACK: Ultra-fast extractive summary
-    logger.info("Using fast extractive summarization as fallback...")
-    extractive_summary = create_extractive_summary(sampled_text, num_sentences=8)
-    note = f"\n\n*(Fast extractive summary from {len(words)} words - AI model was too slow or unavailable.)*"
-    return f"• {extractive_summary}" + note
+    # FALLBACK: Enhanced extractive summary
+    logger.info("Using enhanced extractive summarization...")
+    extractive_summary = create_extractive_summary(sampled_text, num_sentences=12)
+    return format_extractive_summary(extractive_summary, len(words))
 
 # --- API Endpoint ---
 @app.post("/api/summarize/")
@@ -342,39 +419,51 @@ async def api_summarize(request: SummarizeRequest):
 # --- Gradio Interface ---
 with gr.Blocks(title="YouTube Video Summarizer", theme=gr.themes.Soft()) as gradio_interface:
     gr.Markdown("# 📺 YouTube Video Summarizer")
-    gr.Markdown("Enter a YouTube URL to get an AI-generated summary using **yt-dlp** (more reliable than other methods).")
+    gr.Markdown("**Get comprehensive AI-generated summaries** of YouTube videos using **yt-dlp** for reliable transcript extraction.")
     
     status_display = gr.Markdown("Model status: Unknown")
 
     with gr.Row():
-        url_input = gr.Textbox(label="YouTube Video URL", placeholder="https://www.youtube.com/watch?v=...", lines=1, scale=3)
-        submit_btn = gr.Button("Summarize", variant="primary", scale=1)
+        url_input = gr.Textbox(
+            label="YouTube Video URL", 
+            placeholder="https://www.youtube.com/watch?v=...", 
+            lines=1, 
+            scale=3
+        )
+        submit_btn = gr.Button("🚀 Summarize", variant="primary", scale=1)
     
-    output = gr.Markdown(label="Summary")
+    output = gr.Markdown(label="Summary", height=400)
 
     def get_status():
         if summarizer:
-            return "✅ Model is loaded and ready."
+            return "✅ **Model Status:** Loaded and ready for AI summarization"
         if is_model_loading:
-            return "⏳ Model is loading in the background... (this may take several minutes)"
+            return "⏳ **Model Status:** Loading in the background... (this may take several minutes)"
         if model_load_error:
-            return f"❌ Model failed to load: {model_load_error}"
-        return "Waiting to start..."
+            return f"❌ **Model Status:** Failed to load - {model_load_error}"
+        return "⏳ **Model Status:** Initializing..."
 
     def gradio_summarize_wrapper(youtube_url: str):
         try:
             summary = process_and_summarize(youtube_url)
-            return f"✅ **Summary:**\n\n{summary}"
+            return summary  # No need for ✅ prefix since formatting is handled internally
         except Exception as e:
             return f"❌ **Error:** {e}"
 
     submit_btn.click(fn=gradio_summarize_wrapper, inputs=[url_input], outputs=[output])
     
-    gradio_interface.load(get_status, None, status_display, every=2)
+    gradio_interface.load(get_status, None, status_display, every=3)
     
     gr.Examples(
-        examples=[["https://www.youtube.com/watch?v=jNQXAC9IVRw"], ["https://www.youtube.com/watch?v=9bZkp7q19f0"]],
-        inputs=[url_input], outputs=[output], fn=gradio_summarize_wrapper
+        examples=[
+            ["https://www.youtube.com/watch?v=jNQXAC9IVRw"], 
+            ["https://www.youtube.com/watch?v=9bZkp7q19f0"],
+            ["https://www.youtube.com/watch?v=rws_ieEZVao"]
+        ],
+        inputs=[url_input], 
+        outputs=[output], 
+        fn=gradio_summarize_wrapper,
+        label="📋 **Try These Examples:**"
     )
 
 app = gr.mount_gradio_app(app, gradio_interface, path="/")
