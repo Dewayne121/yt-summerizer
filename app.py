@@ -117,89 +117,124 @@ def get_transcript_with_ytdlp(youtube_url: str, retry_count: int = 0) -> Tuple[l
             with open(cookies_file_path, 'w', encoding='utf-8') as f:
                 f.write(netscape_formatted_cookies)
         
-        try:
-            # Add random delay to avoid rate limiting
-            if retry_count > 0:
-                delay = random.randint(5, 15) + (retry_count * 5)
-                logger.info(f"Waiting {delay} seconds before retry {retry_count}...")
-                time.sleep(delay)
-            
-            cmd = [
-                'yt-dlp', 
-                '--write-auto-subs', 
-                '--write-subs', 
-                '--sub-langs', 'en.*', 
-                '--sub-format', 'vtt', 
-                '--skip-download',
-                '--no-warnings'  # Reduce log noise
-            ]
-            
-            # Use random user agent to appear more like a regular browser
-            user_agent = get_random_user_agent()
-            cmd.extend(['--user-agent', user_agent])
-            
-            # Add rate limiting and retry options
-            cmd.extend([
-                '--sleep-interval', '1',  # Sleep between requests
-                '--max-sleep-interval', '5',
-                '--sleep-subtitles', '1',  # Sleep between subtitle downloads
-                '--retries', '3',
-                '--fragment-retries', '3'
-            ])
-            
-            # Disable impersonation to avoid the warning/error
-            cmd.extend(['--extractor-args', 'youtube:player_client=web'])
-            
-            if proxy_url:
-                cmd.extend(['--proxy', proxy_url])
-            
-            if cookies_file_path:
-                cmd.extend(['--cookies', cookies_file_path])
+        # Try multiple subtitle strategies
+        subtitle_strategies = [
+            # Strategy 1: Auto-generated English subtitles (most common)
+            {'sub_langs': 'en', 'write_auto_subs': True, 'write_subs': False},
+            # Strategy 2: Manual English subtitles
+            {'sub_langs': 'en', 'write_auto_subs': False, 'write_subs': True},
+            # Strategy 3: Both auto and manual English
+            {'sub_langs': 'en.*', 'write_auto_subs': True, 'write_subs': True},
+            # Strategy 4: Any English variant + auto-generated
+            {'sub_langs': 'en-US,en-GB,en-CA,en-AU,en', 'write_auto_subs': True, 'write_subs': True},
+            # Strategy 5: Fallback to any available subtitles
+            {'sub_langs': 'all', 'write_auto_subs': True, 'write_subs': True}
+        ]
+        
+        for strategy_idx, strategy in enumerate(subtitle_strategies):
+            try:
+                # Add random delay to avoid rate limiting
+                if retry_count > 0:
+                    delay = random.randint(5, 15) + (retry_count * 5)
+                    logger.info(f"Waiting {delay} seconds before retry {retry_count}...")
+                    time.sleep(delay)
+                
+                cmd = ['yt-dlp', '--sub-format', 'vtt', '--skip-download', '--no-warnings']
+                
+                # Add subtitle strategy options
+                if strategy['write_auto_subs']:
+                    cmd.append('--write-auto-subs')
+                if strategy['write_subs']:
+                    cmd.append('--write-subs')
+                cmd.extend(['--sub-langs', strategy['sub_langs']])
+                
+                # Use random user agent to appear more like a regular browser
+                user_agent = get_random_user_agent()
+                cmd.extend(['--user-agent', user_agent])
+                
+                # Add rate limiting and retry options
+                cmd.extend([
+                    '--sleep-interval', '1',  # Sleep between requests
+                    '--max-sleep-interval', '5',
+                    '--sleep-subtitles', '1',  # Sleep between subtitle downloads
+                    '--retries', '3',
+                    '--fragment-retries', '3'
+                ])
+                
+                # Disable impersonation to avoid the warning/error
+                cmd.extend(['--extractor-args', 'youtube:player_client=web'])
+                
+                if proxy_url:
+                    cmd.extend(['--proxy', proxy_url])
+                
+                if cookies_file_path:
+                    cmd.extend(['--cookies', cookies_file_path])
 
-            cmd.extend(['--output', f'{temp_dir}/%(id)s.%(ext)s', youtube_url])
+                cmd.extend(['--output', f'{temp_dir}/%(id)s.%(ext)s', youtube_url])
 
-            logger.info(f"Running yt-dlp with enhanced rate limiting (attempt {retry_count + 1})...")
-            result = subprocess.run(
-                cmd, 
-                capture_output=True, 
-                text=True, 
-                timeout=120,  # Increased timeout
-                check=True, 
-                encoding='utf-8'
-            )
-            
-            vtt_files = glob.glob(f"{temp_dir}/*.vtt")
-            if not vtt_files: 
-                raise RuntimeError("No English subtitles were found for this video.")
-            
-            with open(vtt_files[0], 'r', encoding='utf-8') as f:
-                vtt_content = f.read()
-            return parse_vtt_to_structured_transcript(vtt_content)
+                logger.info(f"Trying subtitle strategy {strategy_idx + 1}/{len(subtitle_strategies)}: {strategy['sub_langs']} (attempt {retry_count + 1})...")
+                result = subprocess.run(
+                    cmd, 
+                    capture_output=True, 
+                    text=True, 
+                    timeout=120,  # Increased timeout
+                    check=True, 
+                    encoding='utf-8'
+                )
+                
+                # Look for any VTT files
+                vtt_files = glob.glob(f"{temp_dir}/*.vtt")
+                if vtt_files:
+                    # Prioritize English files
+                    english_files = [f for f in vtt_files if any(lang in f.lower() for lang in ['en', 'english'])]
+                    chosen_file = english_files[0] if english_files else vtt_files[0]
+                    
+                    logger.info(f"Found subtitle file: {os.path.basename(chosen_file)}")
+                    with open(chosen_file, 'r', encoding='utf-8') as f:
+                        vtt_content = f.read()
+                    
+                    # Validate that we have actual content
+                    structured_transcript, plain_text = parse_vtt_to_structured_transcript(vtt_content)
+                    if len(plain_text.strip()) > 10:  # Must have at least some content
+                        return structured_transcript, plain_text
+                    else:
+                        logger.warning(f"Subtitle file {chosen_file} had insufficient content, trying next strategy...")
+                        continue
+                
+                # If no files found, try next strategy
+                logger.warning(f"No subtitle files found with strategy {strategy_idx + 1}, trying next...")
+                continue
+                
+            except subprocess.CalledProcessError as e:
+                logger.warning(f"Strategy {strategy_idx + 1} failed: {e.stderr}")
+                if strategy_idx < len(subtitle_strategies) - 1:
+                    continue  # Try next strategy
+                else:
+                    # This was the last strategy, handle the error
+                    if "429" in e.stderr or "Too Many Requests" in e.stderr:
+                        if retry_count < 3:
+                            logger.info(f"Rate limited (429), retrying... (attempt {retry_count + 1}/3)")
+                            return get_transcript_with_ytdlp(youtube_url, retry_count + 1)
+                        else:
+                            raise RuntimeError("YouTube is rate limiting requests. Please try again later (after 15-30 minutes).")
+                    
+                    if "cookies are no longer valid" in e.stderr:
+                        raise RuntimeError("Could not fetch subtitles: Your provided cookies have expired. Please refresh them.")
+                    
+                    if "Video unavailable" in e.stderr:
+                        raise RuntimeError("This video is unavailable or has been removed.")
+                    
+                    if "Private video" in e.stderr:
+                        raise RuntimeError("This video is private and cannot be accessed.")
+        
+        # If we get here, none of the strategies worked
+        raise RuntimeError("No subtitles found for this video. The video may not have captions available, or they may be in a language other than English.")
 
         except subprocess.TimeoutExpired:
             raise RuntimeError("The transcript download timed out (120s).")
-        except subprocess.CalledProcessError as e:
-            logger.error(f"yt-dlp failed: {e.stderr}")
-            
-            # Handle specific error cases
-            if "429" in e.stderr or "Too Many Requests" in e.stderr:
-                if retry_count < 3:  # Allow up to 3 retries
-                    logger.info(f"Rate limited (429), retrying... (attempt {retry_count + 1}/3)")
-                    return get_transcript_with_ytdlp(youtube_url, retry_count + 1)
-                else:
-                    raise RuntimeError("YouTube is rate limiting requests. Please try again later (after 15-30 minutes).")
-            
-            if "cookies are no longer valid" in e.stderr:
-                raise RuntimeError("Could not fetch subtitles: Your provided cookies have expired. Please refresh them.")
-            
-            if "Video unavailable" in e.stderr:
-                raise RuntimeError("This video is unavailable or has been removed.")
-            
-            if "Private video" in e.stderr:
-                raise RuntimeError("This video is private and cannot be accessed.")
-            
-            # Generic fallback
-            raise RuntimeError(f"Unable to fetch subtitles. Error: {e.stderr.split('ERROR:')[-1].strip() if 'ERROR:' in e.stderr else 'Unknown error'}")
+        except Exception as e:
+            logger.error(f"Unexpected error in transcript extraction: {e}")
+            raise RuntimeError(f"Failed to extract subtitles: {str(e)}")
 
 def summarize_with_google_ai(transcript: str, word_count: int) -> str:
     if not model: 
@@ -227,11 +262,42 @@ Transcript ({word_count} words): "{transcript}"
         logger.error(f"AI summarization error: {e}")
         raise RuntimeError(f"The AI summarization failed. Error: {str(e)}")
 
+def check_available_subtitles(youtube_url: str) -> dict:
+    """Debug function to check what subtitles are available for a video"""
+    video_id = get_video_id(youtube_url)
+    if not video_id:
+        return {"error": "Invalid YouTube URL"}
+    
+    with tempfile.TemporaryDirectory() as temp_dir:
+        try:
+            cmd = [
+                'yt-dlp', 
+                '--list-subs',  # List available subtitles
+                '--no-warnings',
+                youtube_url
+            ]
+            
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=30, encoding='utf-8')
+            return {
+                "video_id": video_id,
+                "available_subtitles": result.stdout,
+                "stderr": result.stderr
+            }
+        except Exception as e:
+            return {"error": f"Failed to check subtitles: {str(e)}"}
+
+@app.get("/api/debug-subtitles/")
+async def debug_subtitles(url: str):
+    """Debug endpoint to check available subtitles for a video"""
+    try:
+        result = check_available_subtitles(url)
+        return JSONResponse(content=result)
+    except Exception as e:
+        return JSONResponse(status_code=400, content={"error": str(e)})
+
 @app.get("/")
 async def root():
     return {"message": "YouTube Summarizer API is running", "status": "healthy"}
-
-@app.post("/api/summarize/")
 async def api_summarize(request: SummarizeRequest):
     try:
         logger.info(f"Processing summarization request for: {request.youtube_url}")
