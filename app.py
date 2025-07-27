@@ -95,31 +95,88 @@ def process_and_summarize(youtube_url: str):
     if not video_id:
         raise ValueError("Invalid YouTube URL format provided.")
 
+    # Multiple retry strategies for fetching transcripts
+    transcript_list = None
+    last_error = None
+    
+    # Strategy 1: Try different language combinations
+    language_attempts = [
+        ['en'],
+        ['en-US'], 
+        ['en-GB'],
+        ['a.en'],  # Auto-generated English
+        ['en', 'en-US', 'en-GB']
+    ]
+    
+    for languages in language_attempts:
+        try:
+            logger.info(f"Trying to fetch transcript with languages: {languages}")
+            transcript_list = YouTubeTranscriptApi.get_transcript(video_id, languages=languages)
+            logger.info(f"Successfully fetched transcript with languages: {languages}")
+            break
+        except NoTranscriptFound as e:
+            last_error = e
+            logger.warning(f"No transcript found for languages {languages}: {e}")
+            continue
+        except Exception as e:
+            last_error = e
+            logger.warning(f"Error with languages {languages}: {e}")
+            continue
+    
+    # Strategy 2: If direct methods fail, try getting available transcripts first
+    if transcript_list is None:
+        try:
+            logger.info("Trying to list available transcripts first...")
+            transcript_list_obj = YouTubeTranscriptApi.list_transcripts(video_id)
+            
+            # Try to find any English transcript
+            for transcript in transcript_list_obj:
+                if transcript.language_code.startswith('en') or transcript.language_code == 'a.en':
+                    logger.info(f"Found transcript in language: {transcript.language_code}")
+                    transcript_list = transcript.fetch()
+                    break
+                    
+            # If no English, try the first available transcript and translate
+            if transcript_list is None:
+                for transcript in transcript_list_obj:
+                    try:
+                        logger.info(f"Trying to translate transcript from {transcript.language_code} to English")
+                        transcript_list = transcript.translate('en').fetch()
+                        break
+                    except Exception as e:
+                        logger.warning(f"Translation failed for {transcript.language_code}: {e}")
+                        continue
+                        
+        except Exception as e:
+            last_error = e
+            logger.error(f"Error listing transcripts: {e}")
+    
+    # Strategy 3: Try with cookies (if available)
+    if transcript_list is None:
+        try:
+            logger.info("Trying with cookies parameter...")
+            # You can add cookies here if you have them
+            transcript_list = YouTubeTranscriptApi.get_transcript(
+                video_id, 
+                languages=['en'],
+                cookies={}  # Add cookies here if available
+            )
+        except Exception as e:
+            last_error = e
+            logger.warning(f"Cookies approach failed: {e}")
+    
+    if transcript_list is None:
+        if isinstance(last_error, NoTranscriptFound):
+            raise NoTranscriptFound("This video has no available English transcript or subtitles.")
+        else:
+            logger.error(f"All transcript fetch strategies failed for video_id '{video_id}'. Last error: {last_error}", exc_info=True)
+            raise RuntimeError(f"Unable to fetch transcript. This may be due to: 1) The video is private/restricted, 2) No captions are available, 3) YouTube is blocking the request. Try again later or use a different video. Error: {str(last_error)}")
+
     try:
-        # =========================================================================
-        # === CORRECTED LOGIC FOR youtube-transcript-api ===
-        # =========================================================================
-        # The YouTubeTranscriptApi class methods are static, so we don't instantiate it
-        # Instead, we can set up proxies or other configurations if needed
-        
-        # For basic usage without custom session:
-        transcript_list = YouTubeTranscriptApi.get_transcript(video_id, languages=['en'])
-        
-        # Alternative approach if you need custom headers/session:
-        # You can try using proxies parameter or other available options
-        # transcript_list = YouTubeTranscriptApi.get_transcript(
-        #     video_id, 
-        #     languages=['en'],
-        #     proxies={'http': 'your_proxy', 'https': 'your_proxy'}  # if needed
-        # )
-        # =========================================================================
-        
         full_transcript = " ".join([item['text'] for item in transcript_list])
-    except NoTranscriptFound:
-        raise NoTranscriptFound("This video is valid, but an English transcript was not found.")
     except Exception as e:
-        logger.error(f"Error fetching transcript for video_id '{video_id}': {e}", exc_info=True)
-        raise RuntimeError("An unexpected error occurred while trying to retrieve the transcript. The video may be private or restricted.")
+        logger.error(f"Error processing transcript data: {e}", exc_info=True)
+        raise RuntimeError("Error processing the transcript data.")
 
     if len(full_transcript.split()) < 50:
         raise ValueError("Transcript is too short to generate a meaningful summary.")
