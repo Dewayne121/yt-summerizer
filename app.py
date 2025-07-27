@@ -37,7 +37,25 @@ app.add_middleware(
 class SummarizeRequest(BaseModel):
     youtube_url: str
 
-# --- Core Logic Functions ---
+def convert_json_to_netscape(json_cookies_str: str) -> str:
+    try:
+        cookies = json.loads(json_cookies_str)
+    except json.JSONDecodeError:
+        return json_cookies_str
+    netscape_lines = ["# Netscape HTTP Cookie File"]
+    for cookie in cookies:
+        domain = cookie.get("domain", "")
+        if not domain: continue
+        include_subdomains = "TRUE" if domain.startswith('.') else "FALSE"
+        path = cookie.get("path", "/")
+        secure = "TRUE" if cookie.get("secure", False) else "FALSE"
+        expires = str(int(cookie.get("expirationDate", 0)))
+        name = cookie.get("name", "")
+        value = cookie.get("value", "")
+        if name:
+            netscape_lines.append("\t".join([domain, include_subdomains, path, secure, expires, name, value]))
+    return "\n".join(netscape_lines)
+
 def get_video_id(url: str):
     patterns = [
         r'(?:https?:\/\/)?(?:www\.)?youtube\.com\/watch\?v=([a-zA-Z0-9_-]{11})',
@@ -75,22 +93,33 @@ def get_transcript_with_ytdlp(youtube_url: str):
     if not video_id: raise ValueError("Invalid YouTube URL format provided.")
 
     proxy_url = os.getenv('PROXY_URL')
-
+    cookies_data = os.getenv('YOUTUBE_COOKIES')
+    
     with tempfile.TemporaryDirectory() as temp_dir:
+        cookies_file_path = None
+        if cookies_data:
+            netscape_formatted_cookies = convert_json_to_netscape(cookies_data)
+            cookies_file_path = os.path.join(temp_dir, 'cookies.txt')
+            with open(cookies_file_path, 'w', encoding='utf-8') as f:
+                f.write(netscape_formatted_cookies)
+        
         try:
+            # Build the command with all available tools
             cmd = ['yt-dlp', '--write-auto-subs', '--write-subs', '--sub-langs', 'en.*', '--sub-format', 'vtt', '--skip-download']
             
-            # --- MODIFIED: Use a proxy instead of cookies ---
+            # --- MODIFIED: Add BOTH proxy and cookies if they exist ---
             if proxy_url:
                 logger.info("Using a proxy for the request.")
                 cmd.extend(['--proxy', proxy_url])
-            else:
-                logger.warning("No PROXY_URL found. Making a direct request, which may be rate-limited.")
+            
+            if cookies_file_path:
+                logger.info("Using browser cookies for the request.")
+                cmd.extend(['--cookies', cookies_file_path])
             # --- END MODIFICATION ---
 
             cmd.extend(['--output', f'{temp_dir}/%(id)s.%(ext)s', youtube_url])
 
-            logger.info("Running yt-dlp command...")
+            logger.info("Running yt-dlp command with full configuration...")
             result = subprocess.run(cmd, capture_output=True, text=True, timeout=90, check=True, encoding='utf-8')
             
             vtt_files = glob.glob(f"{temp_dir}/*.vtt")
@@ -104,7 +133,10 @@ def get_transcript_with_ytdlp(youtube_url: str):
             raise RuntimeError("The transcript download timed out (90s). The video may be exceptionally long.")
         except subprocess.CalledProcessError as e:
             logger.error(f"yt-dlp failed: {e.stderr}")
-            raise RuntimeError(f"Could not fetch subtitles. This can happen with rate-limiting (429) or if captions don't exist. Error log: {e.stderr}")
+            # Provide a more specific error message now
+            if "Sign in to confirm you’re not a bot" in e.stderr or "cookies are no longer valid" in e.stderr:
+                raise RuntimeError("Could not fetch subtitles: YouTube requires a valid login. Your provided cookies may have expired. Please refresh them.")
+            raise RuntimeError(f"Could not fetch subtitles. Error: {e.stderr}")
 
 def summarize_with_google_ai(transcript: str, word_count: int):
     # This function is unchanged
