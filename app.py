@@ -92,7 +92,7 @@ def process_and_summarize(youtube_url: str):
         raise ValueError("Invalid YouTube URL format provided.")
 
     try:
-        transcript_list = YouTubeTranscriptApi.get_transcript(video_id, languages=['en'])
+        transcript_list = YouTubeTranscriptApi.get_transcript(video_id, languages=['en'], cookies=None)
         full_transcript = " ".join([item['text'] for item in transcript_list])
     except NoTranscriptFound:
         raise NoTranscriptFound("An English transcript was not found for this video.")
