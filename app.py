@@ -7,9 +7,12 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import re
 import logging
-import asyncio
 import threading
-import requests
+import subprocess
+import tempfile
+import json
+import glob
+from pathlib import Path
 
 # --- Setup ---
 logging.basicConfig(level=logging.INFO)
@@ -62,12 +65,6 @@ app.add_middleware(
     allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"]
 )
 
-try:
-    from youtube_transcript_api import YouTubeTranscriptApi, NoTranscriptFound
-except ImportError:
-    YouTubeTranscriptApi = None
-    NoTranscriptFound = type('NoTranscriptFound', (Exception,), {})
-
 class SummarizeRequest(BaseModel):
     youtube_url: str
 
@@ -83,109 +80,122 @@ def get_video_id(url: str):
         if match: return match.group(1)
     return None
 
+def parse_vtt_content(vtt_content):
+    """Parse VTT subtitle content and extract text."""
+    lines = vtt_content.split('\n')
+    text_lines = []
+    
+    for line in lines:
+        line = line.strip()
+        # Skip VTT headers, timestamps, and empty lines
+        if (line.startswith('WEBVTT') or 
+            line.startswith('Kind:') or 
+            line.startswith('Language:') or
+            '-->' in line or 
+            line.isdigit() or 
+            not line):
+            continue
+        
+        # Remove HTML tags and timing info
+        line = re.sub(r'<[^>]+>', '', line)
+        line = re.sub(r'\d{2}:\d{2}:\d{2}\.\d{3}', '', line)
+        
+        if line:
+            text_lines.append(line)
+    
+    return ' '.join(text_lines)
+
+def get_transcript_with_ytdlp(youtube_url: str):
+    """Get transcript using yt-dlp - much more reliable than youtube-transcript-api."""
+    video_id = get_video_id(youtube_url)
+    if not video_id:
+        raise ValueError("Invalid YouTube URL format provided.")
+    
+    with tempfile.TemporaryDirectory() as temp_dir:
+        try:
+            # Use yt-dlp to download subtitles only
+            cmd = [
+                'yt-dlp',
+                '--write-auto-subs',  # Download auto-generated subtitles
+                '--write-subs',       # Download manual subtitles if available
+                '--sub-langs', 'en,en-US,en-GB',  # Prefer English
+                '--sub-format', 'vtt',  # VTT format is easier to parse
+                '--skip-download',    # Don't download the video
+                '--output', f'{temp_dir}/%(title)s.%(ext)s',
+                youtube_url
+            ]
+            
+            logger.info(f"Running yt-dlp command: {' '.join(cmd)}")
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+            
+            if result.returncode != 0:
+                logger.error(f"yt-dlp failed with return code {result.returncode}")
+                logger.error(f"Error output: {result.stderr}")
+                raise RuntimeError(f"Failed to fetch subtitles: {result.stderr}")
+            
+            # Find the subtitle files
+            vtt_files = glob.glob(f"{temp_dir}/*.vtt")
+            
+            if not vtt_files:
+                raise RuntimeError("No subtitle files were downloaded. This video may not have captions available.")
+            
+            # Prefer manual subtitles over auto-generated ones
+            manual_subs = [f for f in vtt_files if '.en.' in f and 'auto' not in f]
+            auto_subs = [f for f in vtt_files if '.en.' in f and 'auto' in f]
+            
+            subtitle_file = manual_subs[0] if manual_subs else auto_subs[0] if auto_subs else vtt_files[0]
+            
+            logger.info(f"Using subtitle file: {subtitle_file}")
+            
+            with open(subtitle_file, 'r', encoding='utf-8') as f:
+                vtt_content = f.read()
+            
+            transcript_text = parse_vtt_content(vtt_content)
+            
+            if not transcript_text or len(transcript_text.split()) < 10:
+                raise RuntimeError("The extracted transcript is too short or empty.")
+            
+            return transcript_text
+            
+        except subprocess.TimeoutExpired:
+            raise RuntimeError("Transcript fetch timed out. Please try again.")
+        except Exception as e:
+            logger.error(f"Error in get_transcript_with_ytdlp: {e}", exc_info=True)
+            raise
+
 def process_and_summarize(youtube_url: str):
     if is_model_loading:
         raise RuntimeError("The AI model is still loading. Please try again in a few minutes.")
     if summarizer is None:
         raise RuntimeError(f"Model is not available. Load error: {model_load_error or 'Unknown reason.'}")
-    if YouTubeTranscriptApi is None:
-        raise ModuleNotFoundError("The 'youtube-transcript-api' library is not installed on the server.")
-
-    video_id = get_video_id(youtube_url)
-    if not video_id:
-        raise ValueError("Invalid YouTube URL format provided.")
-
-    # Multiple retry strategies for fetching transcripts
-    transcript_list = None
-    last_error = None
-    
-    # Strategy 1: Try different language combinations
-    language_attempts = [
-        ['en'],
-        ['en-US'], 
-        ['en-GB'],
-        ['a.en'],  # Auto-generated English
-        ['en', 'en-US', 'en-GB']
-    ]
-    
-    for languages in language_attempts:
-        try:
-            logger.info(f"Trying to fetch transcript with languages: {languages}")
-            transcript_list = YouTubeTranscriptApi.get_transcript(video_id, languages=languages)
-            logger.info(f"Successfully fetched transcript with languages: {languages}")
-            break
-        except NoTranscriptFound as e:
-            last_error = e
-            logger.warning(f"No transcript found for languages {languages}: {e}")
-            continue
-        except Exception as e:
-            last_error = e
-            logger.warning(f"Error with languages {languages}: {e}")
-            continue
-    
-    # Strategy 2: If direct methods fail, try getting available transcripts first
-    if transcript_list is None:
-        try:
-            logger.info("Trying to list available transcripts first...")
-            transcript_list_obj = YouTubeTranscriptApi.list_transcripts(video_id)
-            
-            # Try to find any English transcript
-            for transcript in transcript_list_obj:
-                if transcript.language_code.startswith('en') or transcript.language_code == 'a.en':
-                    logger.info(f"Found transcript in language: {transcript.language_code}")
-                    transcript_list = transcript.fetch()
-                    break
-                    
-            # If no English, try the first available transcript and translate
-            if transcript_list is None:
-                for transcript in transcript_list_obj:
-                    try:
-                        logger.info(f"Trying to translate transcript from {transcript.language_code} to English")
-                        transcript_list = transcript.translate('en').fetch()
-                        break
-                    except Exception as e:
-                        logger.warning(f"Translation failed for {transcript.language_code}: {e}")
-                        continue
-                        
-        except Exception as e:
-            last_error = e
-            logger.error(f"Error listing transcripts: {e}")
-    
-    # Strategy 3: Try with cookies (if available)
-    if transcript_list is None:
-        try:
-            logger.info("Trying with cookies parameter...")
-            # You can add cookies here if you have them
-            transcript_list = YouTubeTranscriptApi.get_transcript(
-                video_id, 
-                languages=['en'],
-                cookies={}  # Add cookies here if available
-            )
-        except Exception as e:
-            last_error = e
-            logger.warning(f"Cookies approach failed: {e}")
-    
-    if transcript_list is None:
-        if isinstance(last_error, NoTranscriptFound):
-            raise NoTranscriptFound("This video has no available English transcript or subtitles.")
-        else:
-            logger.error(f"All transcript fetch strategies failed for video_id '{video_id}'. Last error: {last_error}", exc_info=True)
-            raise RuntimeError(f"Unable to fetch transcript. This may be due to: 1) The video is private/restricted, 2) No captions are available, 3) YouTube is blocking the request. Try again later or use a different video. Error: {str(last_error)}")
 
     try:
-        full_transcript = " ".join([item['text'] for item in transcript_list])
+        # Get transcript using yt-dlp
+        logger.info("Fetching transcript using yt-dlp...")
+        full_transcript = get_transcript_with_ytdlp(youtube_url)
+        logger.info(f"Successfully fetched transcript with {len(full_transcript.split())} words")
+        
     except Exception as e:
-        logger.error(f"Error processing transcript data: {e}", exc_info=True)
-        raise RuntimeError("Error processing the transcript data.")
+        logger.error(f"Error fetching transcript: {e}", exc_info=True)
+        raise RuntimeError(f"Unable to fetch transcript: {str(e)}")
 
     if len(full_transcript.split()) < 50:
         raise ValueError("Transcript is too short to generate a meaningful summary.")
 
+    # Split transcript into chunks for processing
     words = full_transcript.split()
     chunks = [" ".join(words[i:i + 512]) for i in range(0, len(words), 512)]
     
     max_chunks_for_demo = 3 
-    summaries = [summarizer(chunk, max_length=130, min_length=30, do_sample=False)[0]['summary_text'] for chunk in chunks[:max_chunks_for_demo]]
+    try:
+        summaries = []
+        for i, chunk in enumerate(chunks[:max_chunks_for_demo]):
+            logger.info(f"Summarizing chunk {i+1}/{min(len(chunks), max_chunks_for_demo)}")
+            summary = summarizer(chunk, max_length=130, min_length=30, do_sample=False)[0]['summary_text']
+            summaries.append(summary)
+    except Exception as e:
+        logger.error(f"Error during summarization: {e}", exc_info=True)
+        raise RuntimeError(f"Model failed to generate summary: {str(e)}")
     
     if not summaries:
         raise RuntimeError("Model failed to generate a summary from the transcript.")
@@ -200,7 +210,7 @@ async def api_summarize(request: SummarizeRequest):
     try:
         summary = process_and_summarize(request.youtube_url)
         return JSONResponse(content={"summary": summary})
-    except (ValueError, NoTranscriptFound, ModuleNotFoundError) as e:
+    except (ValueError, RuntimeError) as e:
         return JSONResponse(status_code=400, content={"error": str(e)})
     except Exception as e:
         logger.error(f"API Error: {e}", exc_info=True)
@@ -209,7 +219,7 @@ async def api_summarize(request: SummarizeRequest):
 # --- Gradio Interface ---
 with gr.Blocks(title="YouTube Video Summarizer", theme=gr.themes.Soft()) as gradio_interface:
     gr.Markdown("# 📺 YouTube Video Summarizer")
-    gr.Markdown("Enter a YouTube URL to get an AI-generated summary.")
+    gr.Markdown("Enter a YouTube URL to get an AI-generated summary using **yt-dlp** (more reliable than other methods).")
     
     status_display = gr.Markdown("Model status: Unknown")
 
