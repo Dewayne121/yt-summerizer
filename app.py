@@ -230,12 +230,6 @@ def get_transcript_with_ytdlp(youtube_url: str, retry_count: int = 0) -> Tuple[l
         # If we get here, none of the strategies worked
         raise RuntimeError("No subtitles found for this video. The video may not have captions available, or they may be in a language other than English.")
 
-        except subprocess.TimeoutExpired:
-            raise RuntimeError("The transcript download timed out (120s).")
-        except Exception as e:
-            logger.error(f"Unexpected error in transcript extraction: {e}")
-            raise RuntimeError(f"Failed to extract subtitles: {str(e)}")
-
 def summarize_with_google_ai(transcript: str, word_count: int) -> str:
     if not model: 
         raise RuntimeError("AI model is not available due to a configuration error.")
