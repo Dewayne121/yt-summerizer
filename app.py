@@ -114,9 +114,20 @@ def get_random_user_agent() -> str:
     ]
     return random.choice(user_agents)
 
+def clean_youtube_url(url: str) -> str:
+    """Clean YouTube URL by removing unnecessary parameters"""
+    video_id = get_video_id(url)
+    if video_id:
+        return f"https://www.youtube.com/watch?v={video_id}"
+    return url
+
 def get_transcript_with_ytdlp(youtube_url: str, retry_count: int = 0) -> Tuple[list, str]:
     if not get_video_id(youtube_url): 
         raise ValueError("Invalid YouTube URL format provided.")
+
+    # Clean the URL first
+    clean_url = clean_youtube_url(youtube_url)
+    logger.info(f"Cleaned URL: {clean_url}")
 
     proxy_url = os.getenv('PROXY_URL')
     cookies_data = os.getenv('YOUTUBE_COOKIES')
@@ -129,18 +140,22 @@ def get_transcript_with_ytdlp(youtube_url: str, retry_count: int = 0) -> Tuple[l
             with open(cookies_file_path, 'w', encoding='utf-8') as f:
                 f.write(netscape_formatted_cookies)
         
-        # Try multiple subtitle strategies
+        # Try multiple subtitle strategies with different YouTube client configurations
         subtitle_strategies = [
-            # Strategy 1: Auto-generated English subtitles (most common)
-            {'sub_langs': 'en', 'write_auto_subs': True, 'write_subs': False},
-            # Strategy 2: Manual English subtitles
-            {'sub_langs': 'en', 'write_auto_subs': False, 'write_subs': True},
-            # Strategy 3: Both auto and manual English
-            {'sub_langs': 'en.*', 'write_auto_subs': True, 'write_subs': True},
-            # Strategy 4: Any English variant + auto-generated
-            {'sub_langs': 'en-US,en-GB,en-CA,en-AU,en', 'write_auto_subs': True, 'write_subs': True},
-            # Strategy 5: Fallback to any available subtitles
-            {'sub_langs': 'all', 'write_auto_subs': True, 'write_subs': True}
+            # Strategy 1: Use web client with auto-generated English subtitles
+            {'sub_langs': 'en', 'write_auto_subs': True, 'write_subs': False, 'client': 'web'},
+            # Strategy 2: Use android client (sometimes works when web doesn't)
+            {'sub_langs': 'en', 'write_auto_subs': True, 'write_subs': False, 'client': 'android'},
+            # Strategy 3: Use ios client
+            {'sub_langs': 'en', 'write_auto_subs': True, 'write_subs': False, 'client': 'ios'},
+            # Strategy 4: Minimal command - just basics
+            {'sub_langs': 'en', 'write_auto_subs': True, 'write_subs': False, 'minimal': True},
+            # Strategy 5: Use web client without proxy
+            {'sub_langs': 'en', 'write_auto_subs': True, 'write_subs': False, 'client': 'web', 'no_proxy': True},
+            # Strategy 6: Try TV embedded client
+            {'sub_langs': 'en', 'write_auto_subs': True, 'write_subs': False, 'client': 'tv:embed'},
+            # Strategy 7: All languages as fallback
+            {'sub_langs': 'all', 'write_auto_subs': True, 'write_subs': True, 'client': 'web'},
         ]
         
         for strategy_idx, strategy in enumerate(subtitle_strategies):
@@ -160,31 +175,41 @@ def get_transcript_with_ytdlp(youtube_url: str, retry_count: int = 0) -> Tuple[l
                     cmd.append('--write-subs')
                 cmd.extend(['--sub-langs', strategy['sub_langs']])
                 
-                # Use random user agent to appear more like a regular browser
-                user_agent = get_random_user_agent()
-                cmd.extend(['--user-agent', user_agent])
-                
-                # Add rate limiting and retry options
-                cmd.extend([
-                    '--sleep-interval', '1',  # Sleep between requests
-                    '--max-sleep-interval', '5',
-                    '--sleep-subtitles', '1',  # Sleep between subtitle downloads
-                    '--retries', '3',
-                    '--fragment-retries', '3'
-                ])
-                
-                # Disable impersonation to avoid the warning/error
-                cmd.extend(['--extractor-args', 'youtube:player_client=web'])
-                
-                if proxy_url:
-                    cmd.extend(['--proxy', proxy_url])
-                
-                if cookies_file_path:
-                    cmd.extend(['--cookies', cookies_file_path])
+                # Check if this is a minimal strategy
+                if strategy.get('minimal', False):
+                    # Just add the basic options and skip everything else
+                    pass
+                else:
+                    # Use different YouTube client configurations
+                    client = strategy.get('client', 'web')
+                    cmd.extend(['--extractor-args', f'youtube:player_client={client}'])
+                    
+                    # Use random user agent to appear more like a regular browser
+                    user_agent = get_random_user_agent()
+                    cmd.extend(['--user-agent', user_agent])
+                    
+                    # Add rate limiting and retry options
+                    cmd.extend([
+                        '--sleep-interval', '2',  # Increased sleep
+                        '--max-sleep-interval', '10',
+                        '--sleep-subtitles', '2',
+                        '--retries', '5',  # More retries
+                        '--fragment-retries', '5'
+                    ])
+                    
+                    # Conditionally add proxy (some strategies skip it)
+                    use_proxy = not strategy.get('no_proxy', False)
+                    if proxy_url and use_proxy:
+                        cmd.extend(['--proxy', proxy_url])
+                    elif not use_proxy:
+                        logger.info("Skipping proxy for this strategy")
+                    
+                    if cookies_file_path:
+                        cmd.extend(['--cookies', cookies_file_path])
 
-                cmd.extend(['--output', f'{temp_dir}/%(id)s.%(ext)s', youtube_url])
+                cmd.extend(['--output', f'{temp_dir}/%(id)s.%(ext)s', clean_url])
 
-                logger.info(f"Trying subtitle strategy {strategy_idx + 1}/{len(subtitle_strategies)}: {strategy['sub_langs']} (attempt {retry_count + 1})...")
+                logger.info(f"Trying subtitle strategy {strategy_idx + 1}/{len(subtitle_strategies)}: client={strategy.get('client', 'minimal' if strategy.get('minimal') else 'web')}, langs={strategy['sub_langs']}, no_proxy={strategy.get('no_proxy', False)} (attempt {retry_count + 1})...")
                 logger.info(f"Command: {' '.join(cmd)}")
                 
                 result = subprocess.run(
