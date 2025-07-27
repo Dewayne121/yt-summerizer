@@ -26,5 +26,5 @@ COPY . .
 
 # --- CORRECTED COMMAND ---
 # This version hardcodes the internal port to 8080. Railway will automatically
-# map its external port (like 443) to this internal port. This is a standard practice.
+# map its external port (like 443) to this internal port. This is the standard, reliable practice.
 CMD ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "8080"]
