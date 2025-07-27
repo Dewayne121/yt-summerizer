@@ -6,6 +6,4 @@ pydantic
 requests
 google-generativeai==0.7.2
 brotli
-
-# This line is critical: it installs yt-dlp with the impersonation dependency
-yt-dlp[default,curl_cffi]>=2024.07.25
+yt-dlp>=2024.07.25
