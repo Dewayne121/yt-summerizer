@@ -13,7 +13,7 @@ from pydantic import BaseModel
 
 # --- Setup ---
 logging.basicConfig(level=logging.INFO)
-logger = a=logging.getLogger(__name__)
+logger = logging.getLogger(__name__)
 
 # --- Configure Google AI API ---
 try:
@@ -106,18 +106,25 @@ def get_transcript_with_ytdlp(youtube_url: str):
         try:
             cmd = ['yt-dlp', '--write-auto-subs', '--write-subs', '--sub-langs', 'en.*', '--sub-format', 'vtt', '--skip-download']
             
+            # --- FINAL, STABLE STRATEGY ---
+            # 1. Add a standard browser User-Agent header
+            user_agent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36"
+            cmd.extend(['--user-agent', user_agent])
+            
+            # 2. Add the proxy if it exists
             if proxy_url:
+                logger.info("Using a proxy for the request.")
                 cmd.extend(['--proxy', proxy_url])
             
+            # 3. Add cookies if they exist
             if cookies_file_path:
+                logger.info("Using browser cookies for the request.")
                 cmd.extend(['--cookies', cookies_file_path])
-            
-            # This should now work because of the Dockerfile and correct requirements.txt
-            cmd.extend(['--impersonate', 'chrome110'])
+            # --- END FINAL STRATEGY ---
 
             cmd.extend(['--output', f'{temp_dir}/%(id)s.%(ext)s', youtube_url])
 
-            logger.info("Running yt-dlp with impersonation and full configuration...")
+            logger.info("Running yt-dlp with stable configuration (User-Agent, Proxy, Cookies)...")
             result = subprocess.run(cmd, capture_output=True, text=True, timeout=90, check=True, encoding='utf-8')
             
             vtt_files = glob.glob(f"{temp_dir}/*.vtt")
@@ -133,8 +140,6 @@ def get_transcript_with_ytdlp(youtube_url: str):
             logger.error(f"yt-dlp failed: {e.stderr}")
             if "Sign in to confirm you’re not a bot" in e.stderr or "cookies are no longer valid" in e.stderr:
                 raise RuntimeError("Could not fetch subtitles: YouTube requires a valid login. Your provided cookies may have expired. Please refresh them.")
-            if "Impersonate target" in e.stderr:
-                raise RuntimeError("A critical dependency for impersonation is missing in the server environment. This is a deployment issue.")
             raise RuntimeError(f"Could not fetch subtitles. Error: {e.stderr}")
 
 def summarize_with_google_ai(transcript: str, word_count: int):
