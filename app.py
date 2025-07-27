@@ -8,6 +8,7 @@ from pydantic import BaseModel
 import re
 import logging
 from contextlib import asynccontextmanager
+import requests # <--- NEW IMPORT
 
 # --- Setup ---
 logging.basicConfig(level=logging.INFO)
@@ -39,14 +40,10 @@ async def lifespan(app: FastAPI):
         logger.error(f"Lifespan: FATAL - Failed to load model: {e}", exc_info=True)
     
     yield  # The application is now running
-    
-    # --- Shutdown logic (if any) would go here ---
     logger.info("Lifespan: Application shutdown.")
 
 # --- FastAPI App Initialization ---
 app = FastAPI(title="YouTube Video Summarizer API", lifespan=lifespan)
-
-# Add CORS middleware to allow requests from any origin (e.g., your front-end)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -79,6 +76,9 @@ def get_video_id(url: str):
         if match: return match.group(1)
     return None
 
+# =========================================================================
+# === THIS IS THE HEAVILY MODIFIED FUNCTION WITH THE FIX ===
+# =========================================================================
 def process_and_summarize(youtube_url: str):
     """The main business logic for summarizing a YouTube video."""
     if summarizer is None:
@@ -91,14 +91,24 @@ def process_and_summarize(youtube_url: str):
         raise ValueError("Invalid YouTube URL format provided.")
 
     try:
-        # Added cookies=None to handle YouTube's consent screen on servers.
-        transcript_list = YouTubeTranscriptApi.get_transcript(video_id, languages=['en'], cookies=None)
+        # Create a requests session with a common browser user-agent
+        session = requests.Session()
+        session.headers.update({
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/109.0.0.0 Safari/537.36',
+            'Accept-Language': 'en-US,en;q=0.5' # Request English content
+        })
+
+        # Pass the custom session to the API
+        transcript_list = YouTubeTranscriptApi.get_transcript(video_id, languages=['en'], http_session=session)
+        
         full_transcript = " ".join([item['text'] for item in transcript_list])
+
     except NoTranscriptFound:
-        raise NoTranscriptFound("An English transcript was not found for this video.")
+        raise NoTranscriptFound("This video is valid, but an English transcript was not found.")
     except Exception as e:
-        logger.error(f"Error fetching transcript for video_id '{video_id}': {e}")
-        raise RuntimeError("Failed to retrieve the transcript from YouTube.")
+        logger.error(f"Error fetching transcript for video_id '{video_id}': {e}", exc_info=True)
+        # Give a generic but informative error now that we've tried a robust method
+        raise RuntimeError("An unexpected error occurred while trying to retrieve the transcript. The video may be private, restricted, or unavailable in your region.")
 
     if len(full_transcript.split()) < 50:
         raise ValueError("Transcript is too short to generate a meaningful summary.")
@@ -116,21 +126,21 @@ def process_and_summarize(youtube_url: str):
     final_summary = "\n\n".join([f"• {s}" for s in summaries])
     note = f"\n\n*(Note: Summary generated from the first {len(summaries)} part(s) of the video.)*" if len(chunks) > len(summaries) else ""
     return final_summary
+# =========================================================================
 
-# --- API Endpoint for Programmatic Access ---
+# --- API Endpoint (No changes needed here) ---
 @app.post("/api/summarize/")
 async def api_summarize(request: SummarizeRequest):
-    """This endpoint is for your custom front-end or other services to call."""
     try:
         summary = process_and_summarize(request.youtube_url)
         return JSONResponse(content={"summary": summary})
     except (ValueError, NoTranscriptFound, ModuleNotFoundError) as e:
-        return JSONResponse(status_code=400, content={"error": str(e)}) # User/Client Error
+        return JSONResponse(status_code=400, content={"error": str(e)})
     except Exception as e:
         logger.error(f"API Error: {e}", exc_info=True)
         return JSONResponse(status_code=500, content={"error": "An internal server error occurred."})
 
-# --- Gradio Interface ---
+# --- Gradio Interface (No changes needed here) ---
 with gr.Blocks(title="YouTube Video Summarizer", theme=gr.themes.Soft()) as gradio_interface:
     gr.Markdown("# 📺 YouTube Video Summarizer")
     gr.Markdown("Enter a YouTube URL to get an AI-generated summary. The video must have English captions/transcripts.")
@@ -142,16 +152,13 @@ with gr.Blocks(title="YouTube Video Summarizer", theme=gr.themes.Soft()) as grad
     output = gr.Markdown(label="Summary")
 
     def gradio_summarize_wrapper(youtube_url: str):
-        """Wrapper function for the Gradio UI to provide clean error messages."""
         try:
-            # Check for model availability before processing
             if summarizer is None:
                  return f"❌ **Error:** Model is not ready. Please try again in a moment. {model_load_error or ''}"
             
             summary = process_and_summarize(youtube_url)
             return f"✅ **Summary:**\n\n{summary}"
         except Exception as e:
-            # Return any error from the core logic directly to the user
             return f"❌ **Error:** {e}"
 
     submit_btn.click(fn=gradio_summarize_wrapper, inputs=[url_input], outputs=[output])
