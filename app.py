@@ -106,9 +106,11 @@ def get_transcript_with_ytdlp(youtube_url: str):
         try:
             cmd = ['yt-dlp', '--write-auto-subs', '--write-subs', '--sub-langs', 'en.*', '--sub-format', 'vtt', '--skip-download']
             
-            # --- FINAL, STABLE STRATEGY ---
-            # 1. Add a standard browser User-Agent header
-            user_agent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36"
+            # --- FINAL, STABLE STRATEGY: Proxy + Cookies + User-Agent ---
+            # This combination does not rely on the fragile --impersonate flag.
+            
+            # 1. Add a standard browser User-Agent header to look like a real browser
+            user_agent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
             cmd.extend(['--user-agent', user_agent])
             
             # 2. Add the proxy if it exists
@@ -148,7 +150,7 @@ def summarize_with_google_ai(transcript: str, word_count: int):
     prompt = f"""As an expert analyst, provide a comprehensive summary of the following video transcript. Format your output in Markdown with two distinct sections: ## Quick Summary\nA concise paragraph capturing the main point and conclusion. ## Key Takeaways\nA bulleted list of the 4-6 most important points. --- Transcript: "{transcript}" """
     try:
         response = model.generate_content(prompt)
-        summary_markdown = response.text + f"\n\n*AI analysis powered by Google Gemini. Processed approximately {word_count:,} words.*"
+        summary_markdown = response.text
         return summary_markdown
     except Exception as e:
         raise RuntimeError(f"The AI summarization failed. Error: {e}")
