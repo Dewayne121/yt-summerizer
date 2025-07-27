@@ -37,6 +37,37 @@ app.add_middleware(
 class SummarizeRequest(BaseModel):
     youtube_url: str
 
+# --- NEW: Helper function to convert JSON cookies to Netscape format ---
+def convert_json_to_netscape(json_cookies_str: str) -> str:
+    """
+    Converts a JSON string of browser cookies to the Netscape cookies.txt format.
+    """
+    try:
+        cookies = json.loads(json_cookies_str)
+    except json.JSONDecodeError:
+        logger.error("Failed to decode JSON from YOUTUBE_COOKIES variable.")
+        # If it's not JSON, maybe it's already Netscape format. Return as is.
+        return json_cookies_str
+
+    netscape_lines = ["# Netscape HTTP Cookie File"]
+    for cookie in cookies:
+        # Required fields for Netscape format
+        domain = cookie.get("domain", "")
+        # The "hostOnly" flag determines if the domain should have a preceding dot.
+        # Netscape format wants TRUE/FALSE for subdomain access.
+        include_subdomains = "FALSE" if cookie.get("hostOnly", True) else "TRUE"
+        path = cookie.get("path", "/")
+        secure = "TRUE" if cookie.get("secure", False) else "FALSE"
+        # Expiration date must be an integer
+        expires = str(int(cookie.get("expirationDate", 0)))
+        name = cookie.get("name", "")
+        value = cookie.get("value", "")
+        
+        netscape_lines.append("\t".join([domain, include_subdomains, path, secure, expires, name, value]))
+
+    return "\n".join(netscape_lines)
+
+
 # --- Core Logic Functions ---
 def get_video_id(url: str):
     patterns = [
@@ -78,24 +109,20 @@ def get_transcript_with_ytdlp(youtube_url: str):
         cookies_file_path = None
         cookies_data = os.getenv('YOUTUBE_COOKIES')
         
-        # --- MODIFIED: Handles both JSON and Netscape cookie formats ---
+        # --- MODIFIED: Always convert to Netscape format and save as cookies.txt ---
         if cookies_data:
-            # Check if the data is likely JSON
-            if cookies_data.strip().startswith('['):
-                cookies_file_path = os.path.join(temp_dir, 'cookies.json')
-            else:
-                cookies_file_path = os.path.join(temp_dir, 'cookies.txt')
-            
+            logger.info("Found cookie data. Converting to Netscape format...")
+            netscape_formatted_cookies = convert_json_to_netscape(cookies_data)
+            cookies_file_path = os.path.join(temp_dir, 'cookies.txt')
             with open(cookies_file_path, 'w') as f:
-                f.write(cookies_data)
-            logger.info(f"Using browser cookies from '{os.path.basename(cookies_file_path)}'.")
+                f.write(netscape_formatted_cookies)
+            logger.info("Successfully created Netscape cookies.txt file.")
         # --- END MODIFICATION ---
 
         try:
             cmd = ['yt-dlp', '--write-auto-subs', '--write-subs', '--sub-langs', 'en.*', '--sub-format', 'vtt', '--skip-download']
             
             if cookies_file_path:
-                # yt-dlp uses --cookies for both .txt and .json formats
                 cmd.extend(['--cookies', cookies_file_path])
             
             cmd.extend(['--impersonate', 'chrome110'])
@@ -115,7 +142,7 @@ def get_transcript_with_ytdlp(youtube_url: str):
             raise RuntimeError("The transcript download timed out (90s). The video may be exceptionally long.")
         except subprocess.CalledProcessError as e:
             logger.error(f"yt-dlp failed: {e.stderr}")
-            raise RuntimeError(f"Could not fetch subtitles. This can happen with rate-limiting (429) or if captions don't exist. Using cookies can help. Error log: {e.stderr}")
+            raise RuntimeError(f"Could not fetch subtitles. This can happen with rate-limiting (429) or if captions don't exist. The cookies provided may be invalid or expired. Error log: {e.stderr}")
 
 def summarize_with_google_ai(transcript: str, word_count: int):
     if not model: raise RuntimeError("AI model is not available due to a configuration error.")
