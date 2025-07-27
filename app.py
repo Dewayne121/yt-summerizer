@@ -38,6 +38,7 @@ class SummarizeRequest(BaseModel):
     youtube_url: str
 
 def convert_json_to_netscape(json_cookies_str: str) -> str:
+    # This function is unchanged and correct
     try:
         cookies = json.loads(json_cookies_str)
     except json.JSONDecodeError:
@@ -57,6 +58,7 @@ def convert_json_to_netscape(json_cookies_str: str) -> str:
     return "\n".join(netscape_lines)
 
 def get_video_id(url: str):
+    # This function is unchanged and correct
     patterns = [
         r'(?:https?:\/\/)?(?:www\.)?youtube\.com\/watch\?v=([a-zA-Z0-9_-]{11})',
         r'(?:https?:\/\/)?youtu\.be\/([a-zA-Z0-9_-]{11})'
@@ -67,6 +69,7 @@ def get_video_id(url: str):
     return None
 
 def parse_vtt_to_structured_transcript(vtt_content: str):
+    # This function is unchanged and correct
     lines = vtt_content.strip().split('\n')
     structured_transcript = []
     full_text_lines = []
@@ -89,8 +92,7 @@ def parse_vtt_to_structured_transcript(vtt_content: str):
     return structured_transcript, plain_text
 
 def get_transcript_with_ytdlp(youtube_url: str):
-    video_id = get_video_id(youtube_url)
-    if not video_id: raise ValueError("Invalid YouTube URL format provided.")
+    if not get_video_id(youtube_url): raise ValueError("Invalid YouTube URL format provided.")
 
     proxy_url = os.getenv('PROXY_URL')
     cookies_data = os.getenv('YOUTUBE_COOKIES')
@@ -106,20 +108,23 @@ def get_transcript_with_ytdlp(youtube_url: str):
         try:
             cmd = ['yt-dlp', '--write-auto-subs', '--write-subs', '--sub-langs', 'en.*', '--sub-format', 'vtt', '--skip-download']
             
+            # --- FINAL, STABLE STRATEGY ---
             user_agent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
             cmd.extend(['--user-agent', user_agent])
             
+            # ** NEW: Explicitly disable the failing impersonation fallback **
+            cmd.extend(['--extractor-args', 'generic:impersonate=false'])
+            
             if proxy_url:
-                logger.info("Using a proxy for the request.")
                 cmd.extend(['--proxy', proxy_url])
             
             if cookies_file_path:
-                logger.info("Using browser cookies for the request.")
                 cmd.extend(['--cookies', cookies_file_path])
+            # --- END FINAL STRATEGY ---
 
             cmd.extend(['--output', f'{temp_dir}/%(id)s.%(ext)s', youtube_url])
 
-            logger.info("Running yt-dlp with stable configuration (User-Agent, Proxy, Cookies)...")
+            logger.info("Running yt-dlp with stable configuration (NO IMPERSONATION)...")
             result = subprocess.run(cmd, capture_output=True, text=True, timeout=90, check=True, encoding='utf-8')
             
             vtt_files = glob.glob(f"{temp_dir}/*.vtt")
@@ -130,12 +135,12 @@ def get_transcript_with_ytdlp(youtube_url: str):
             return parse_vtt_to_structured_transcript(vtt_content)
 
         except subprocess.TimeoutExpired:
-            raise RuntimeError("The transcript download timed out (90s). The video may be exceptionally long.")
+            raise RuntimeError("The transcript download timed out (90s).")
         except subprocess.CalledProcessError as e:
             logger.error(f"yt-dlp failed: {e.stderr}")
-            if "Sign in to confirm you’re not a bot" in e.stderr or "cookies are no longer valid" in e.stderr:
-                raise RuntimeError("Could not fetch subtitles: YouTube requires a valid login. Your provided cookies may have expired. Please refresh them.")
-            raise RuntimeError(f"Could not fetch subtitles. Error: {e.stderr}")
+            if "cookies are no longer valid" in e.stderr:
+                raise RuntimeError("Could not fetch subtitles: Your provided cookies have expired. Please refresh them.")
+            raise RuntimeError(f"Could not fetch subtitles. This is likely a network or proxy issue (Error 429). Please try again or refresh your proxy IP.")
 
 def summarize_with_google_ai(transcript: str, word_count: int):
     if not model: raise RuntimeError("AI model is not available due to a configuration error.")
