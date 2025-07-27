@@ -13,6 +13,9 @@ import tempfile
 import json
 import glob
 from pathlib import Path
+import signal
+import time
+from concurrent.futures import ThreadPoolExecutor, TimeoutError
 
 # --- Setup ---
 logging.basicConfig(level=logging.INFO)
@@ -34,11 +37,11 @@ def load_model_proc():
     is_model_loading = True
     logger.info("Background thread: Starting model loading...")
     try:
-        # SPEED OPTIMIZATION: Try a faster model first
+        # SPEED OPTIMIZATION: Try faster, more reliable models
         model_options = [
-            "facebook/bart-large-cnn",          # Usually faster than distilbart
+            "sshleifer/distilbart-cnn-6-6",     # Smaller, faster version
             "sshleifer/distilbart-cnn-12-6",    # Original choice
-            "google/pegasus-xsum",              # Alternative fast option
+            "facebook/bart-large-cnn",          # Alternative
         ]
         
         model_name = os.getenv("MODEL_NAME", model_options[0])
@@ -54,9 +57,9 @@ def load_model_proc():
                     "summarization",
                     model=model,
                     device=-1,
-                    # Speed optimizations
-                    torch_dtype="auto",
-                    trust_remote_code=True
+                    # Optimizations for speed and stability
+                    framework="pt",
+                    return_tensors="pt",
                 )
                 logger.info(f"Successfully loaded model: {model}")
                 break
@@ -227,6 +230,28 @@ def create_extractive_summary(text, num_sentences=6):
     
     return '. '.join(ordered_summary) + '.'
 
+def summarize_with_timeout(summarizer, chunk, timeout_seconds=30):
+    """Summarize a chunk with a timeout to prevent hanging."""
+    def summarize_chunk():
+        return summarizer(
+            chunk, 
+            max_length=80,
+            min_length=15,
+            do_sample=False,
+            truncation=True,
+            # Fixed parameters for greedy decoding (num_beams=1)
+            pad_token_id=summarizer.tokenizer.eos_token_id,
+            # Remove conflicting parameters
+        )[0]['summary_text']
+    
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        future = executor.submit(summarize_chunk)
+        try:
+            return future.result(timeout=timeout_seconds)
+        except TimeoutError:
+            logger.warning(f"Summarization timed out after {timeout_seconds} seconds")
+            return None
+
 def process_and_summarize(youtube_url: str):
     if is_model_loading:
         raise RuntimeError("The AI model is still loading. Please try again in a few minutes.")
@@ -261,13 +286,12 @@ def process_and_summarize(youtube_url: str):
     
     sampled_text = " ".join(words)
     
-    # EMERGENCY SPEED OPTION: If AI is too slow, use extractive summary
+    # Try AI summarization with timeout protection
     try:
-        # Set a practical timeout approach
-        logger.info("Starting AI summarization with speed optimizations...")
+        logger.info("Starting AI summarization with timeout protection...")
         
         # SPEED OPTIMIZATION 2: Use smaller, faster chunks
-        chunk_size = 300  # Even smaller chunks
+        chunk_size = 300  # Small chunks for speed
         chunks = [" ".join(words[i:i + chunk_size]) for i in range(0, len(words), chunk_size)]
         
         # SPEED OPTIMIZATION 3: Process only 1-2 chunks maximum
@@ -275,23 +299,19 @@ def process_and_summarize(youtube_url: str):
         
         summaries = []
         for i, chunk in enumerate(chunks[:max_chunks]):
-            logger.info(f"AI Summarizing chunk {i+1}/{max_chunks}")
+            logger.info(f"AI Summarizing chunk {i+1}/{max_chunks} with 30-second timeout")
             
-            # SPEED OPTIMIZATION 4: Fastest possible parameters
-            summary = summarizer(
-                chunk, 
-                max_length=80,   # Even shorter
-                min_length=15,   # Even shorter minimum
-                do_sample=False,
-                truncation=True,
-                num_beams=1,     # No beam search for maximum speed
-                early_stopping=True,
-                repetition_penalty=1.1
-            )[0]['summary_text']
+            # Use timeout-protected summarization
+            summary = summarize_with_timeout(summarizer, chunk, timeout_seconds=30)
+            
+            if summary is None:
+                logger.warning(f"Chunk {i+1} timed out, switching to extractive method")
+                break
             
             summaries.append(summary)
             logger.info(f"AI chunk {i+1} completed successfully")
         
+        # If we got at least one AI summary, use it
         if summaries:
             final_summary = "\n\n".join([f"• {s}" for s in summaries])
             total_words_processed = len(words)
@@ -299,13 +319,13 @@ def process_and_summarize(youtube_url: str):
             return final_summary + note
             
     except Exception as e:
-        logger.warning(f"AI summarization failed or too slow: {e}")
-        logger.info("Falling back to fast extractive summarization...")
-        
-        # FALLBACK: Ultra-fast extractive summary
-        extractive_summary = create_extractive_summary(sampled_text, num_sentences=8)
-        note = f"\n\n*(Fast extractive summary from {len(words)} words - AI model was unavailable or too slow.)*"
-        return f"• {extractive_summary}" + note
+        logger.warning(f"AI summarization failed: {e}")
+    
+    # FALLBACK: Ultra-fast extractive summary
+    logger.info("Using fast extractive summarization as fallback...")
+    extractive_summary = create_extractive_summary(sampled_text, num_sentences=8)
+    note = f"\n\n*(Fast extractive summary from {len(words)} words - AI model was too slow or unavailable.)*"
+    return f"• {extractive_summary}" + note
 
 # --- API Endpoint ---
 @app.post("/api/summarize/")
