@@ -292,6 +292,26 @@ def check_available_subtitles(youtube_url: str) -> dict:
         except Exception as e:
             return {"error": f"Failed to check subtitles: {str(e)}"}
 
+# --- Route Definitions ---
+@app.get("/")
+async def root():
+    return {"message": "YouTube Summarizer API is running", "status": "healthy"}
+
+@app.get("/health")
+async def health_check():
+    return {"status": "healthy", "message": "API is running"}
+
+@app.get("/routes")
+async def list_routes():
+    routes = []
+    for route in app.routes:
+        if hasattr(route, 'methods') and hasattr(route, 'path'):
+            routes.append({
+                "path": route.path, 
+                "methods": list(route.methods)
+            })
+    return {"routes": routes}
+
 @app.get("/api/debug-subtitles/")
 async def debug_subtitles(url: str):
     """Debug endpoint to check available subtitles for a video"""
@@ -301,10 +321,8 @@ async def debug_subtitles(url: str):
     except Exception as e:
         return JSONResponse(status_code=400, content={"error": str(e)})
 
-@app.get("/")
-async def root():
-    return {"message": "YouTube Summarizer API is running", "status": "healthy"}
-async def api_summarize(request: SummarizeRequest):
+# Define the main summarize endpoint
+async def summarize_video(request: SummarizeRequest):
     try:
         logger.info(f"Processing summarization request for: {request.youtube_url}")
         
@@ -332,6 +350,10 @@ async def api_summarize(request: SummarizeRequest):
     except Exception as e:
         logger.error(f"Unexpected error: {e}", exc_info=True)
         return JSONResponse(status_code=500, content={"error": "An internal server error occurred. Please try again later."})
+
+# Register the endpoint with multiple routes
+app.post("/api/summarize/")(summarize_video)
+app.post("/api/summarize")(summarize_video)
 
 if __name__ == "__main__":
     import uvicorn
