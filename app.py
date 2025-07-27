@@ -106,7 +106,6 @@ def get_transcript_with_ytdlp(youtube_url: str):
         try:
             cmd = ['yt-dlp', '--write-auto-subs', '--write-subs', '--sub-langs', 'en.*', '--sub-format', 'vtt', '--skip-download']
             
-            # --- FINAL, STABLE STRATEGY: Proxy + Cookies + User-Agent ---
             user_agent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
             cmd.extend(['--user-agent', user_agent])
             
@@ -117,7 +116,6 @@ def get_transcript_with_ytdlp(youtube_url: str):
             if cookies_file_path:
                 logger.info("Using browser cookies for the request.")
                 cmd.extend(['--cookies', cookies_file_path])
-            # --- END FINAL STRATEGY ---
 
             cmd.extend(['--output', f'{temp_dir}/%(id)s.%(ext)s', youtube_url])
 
@@ -140,7 +138,6 @@ def get_transcript_with_ytdlp(youtube_url: str):
             raise RuntimeError(f"Could not fetch subtitles. Error: {e.stderr}")
 
 def summarize_with_google_ai(transcript: str, word_count: int):
-    # This function is unchanged
     if not model: raise RuntimeError("AI model is not available due to a configuration error.")
     prompt = f"""As an expert analyst, provide a comprehensive summary of the following video transcript. Format your output in Markdown with two distinct sections: ## Quick Summary\nA concise paragraph capturing the main point and conclusion. ## Key Takeaways\nA bulleted list of the 4-6 most important points. --- Transcript: "{transcript}" """
     try:
@@ -152,7 +149,6 @@ def summarize_with_google_ai(transcript: str, word_count: int):
 
 @app.post("/api/summarize/")
 async def api_summarize(request: SummarizeRequest):
-    # This function is unchanged
     try:
         structured_transcript, plain_text = get_transcript_with_ytdlp(request.youtube_url)
         word_count = len(plain_text.split())
