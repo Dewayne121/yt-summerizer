@@ -45,87 +45,81 @@ def get_video_id(url: str):
     ]
     for pattern in patterns:
         match = re.search(pattern, url.strip())
-        if match:
-            return match.group(1)
+        if match: return match.group(1)
     return None
 
 def parse_vtt_to_structured_transcript(vtt_content: str):
-    """
-    Parses VTT content into a list of dictionaries with start time and text.
-    Also returns the full plain text for summarization.
-    """
     lines = vtt_content.strip().split('\n')
     structured_transcript = []
     full_text_lines = []
-    current_text = ""
-    start_time = ""
-
     for i, line in enumerate(lines):
         if '-->' in line:
             try:
-                # Capture the start time from the timestamp line
-                start_time = line.split('-->')[0].strip().split('.')[0] # Get time before milliseconds
-                # The actual text is on the next line(s)
+                start_time = line.split('-->')[0].strip().split('.')[0]
                 text_parts = []
                 j = i + 1
                 while j < len(lines) and lines[j].strip() != '':
-                    # Remove HTML-like tags from captions
                     cleaned_line = re.sub(r'<[^>]+>', '', lines[j])
                     text_parts.append(cleaned_line.strip())
                     j += 1
-                
                 current_text = " ".join(text_parts)
-                
-                if start_time and current_text:
-                    # Avoid adding duplicate entries from multi-line captions
-                    if not structured_transcript or structured_transcript[-1]['text'] != current_text:
-                        structured_transcript.append({"time": start_time, "text": current_text})
-                        full_text_lines.append(current_text)
-
-            except IndexError:
-                continue # Skip malformed timestamp lines
-                
+                if start_time and current_text and (not structured_transcript or structured_transcript[-1]['text'] != current_text):
+                    structured_transcript.append({"time": start_time, "text": current_text})
+                    full_text_lines.append(current_text)
+            except IndexError: continue
     plain_text = " ".join(full_text_lines)
     return structured_transcript, plain_text
 
-
 def get_transcript_with_ytdlp(youtube_url: str):
     video_id = get_video_id(youtube_url)
-    if not video_id:
-        raise ValueError("Invalid YouTube URL format provided.")
+    if not video_id: raise ValueError("Invalid YouTube URL format provided.")
 
     with tempfile.TemporaryDirectory() as temp_dir:
+        cookies_file_path = None
+        cookies_data = os.getenv('YOUTUBE_COOKIES')
+        
+        # --- MODIFIED: Handles both JSON and Netscape cookie formats ---
+        if cookies_data:
+            # Check if the data is likely JSON
+            if cookies_data.strip().startswith('['):
+                cookies_file_path = os.path.join(temp_dir, 'cookies.json')
+            else:
+                cookies_file_path = os.path.join(temp_dir, 'cookies.txt')
+            
+            with open(cookies_file_path, 'w') as f:
+                f.write(cookies_data)
+            logger.info(f"Using browser cookies from '{os.path.basename(cookies_file_path)}'.")
+        # --- END MODIFICATION ---
+
         try:
-            cmd = ['yt-dlp', '--write-auto-subs', '--write-subs', '--sub-langs', 'en.*', '--sub-format', 'vtt', '--skip-download', '--output', f'{temp_dir}/%(id)s.%(ext)s', youtube_url]
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=60, check=True, encoding='utf-8')
+            cmd = ['yt-dlp', '--write-auto-subs', '--write-subs', '--sub-langs', 'en.*', '--sub-format', 'vtt', '--skip-download']
+            
+            if cookies_file_path:
+                # yt-dlp uses --cookies for both .txt and .json formats
+                cmd.extend(['--cookies', cookies_file_path])
+            
+            cmd.extend(['--impersonate', 'chrome110'])
+            cmd.extend(['--output', f'{temp_dir}/%(id)s.%(ext)s', youtube_url])
+
+            logger.info("Running enhanced yt-dlp command.")
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=90, check=True, encoding='utf-8')
+            
             vtt_files = glob.glob(f"{temp_dir}/*.vtt")
-            if not vtt_files:
-                raise RuntimeError("No English subtitles were found for this video.")
+            if not vtt_files: raise RuntimeError("No English subtitles were found for this video.")
+            
             with open(vtt_files[0], 'r', encoding='utf-8') as f:
                 vtt_content = f.read()
             return parse_vtt_to_structured_transcript(vtt_content)
+
         except subprocess.TimeoutExpired:
-            raise RuntimeError("The transcript download timed out.")
+            raise RuntimeError("The transcript download timed out (90s). The video may be exceptionally long.")
         except subprocess.CalledProcessError as e:
-            raise RuntimeError(f"Could not fetch subtitles: {e.stderr}")
+            logger.error(f"yt-dlp failed: {e.stderr}")
+            raise RuntimeError(f"Could not fetch subtitles. This can happen with rate-limiting (429) or if captions don't exist. Using cookies can help. Error log: {e.stderr}")
 
 def summarize_with_google_ai(transcript: str, word_count: int):
-    if not model:
-        raise RuntimeError("AI model is not available due to a configuration error.")
-
-    prompt = f"""
-    As an expert analyst, provide a comprehensive summary of the following video transcript.
-    Format your output in Markdown with two distinct sections:
-    
-    ## Quick Summary
-    A concise paragraph capturing the main point and conclusion.
-    
-    ## Key Takeaways
-    A bulleted list of the 4-6 most important points.
-    
-    ---
-    Transcript: "{transcript}"
-    """
+    if not model: raise RuntimeError("AI model is not available due to a configuration error.")
+    prompt = f"""As an expert analyst, provide a comprehensive summary of the following video transcript. Format your output in Markdown with two distinct sections: ## Quick Summary\nA concise paragraph capturing the main point and conclusion. ## Key Takeaways\nA bulleted list of the 4-6 most important points. --- Transcript: "{transcript}" """
     try:
         response = model.generate_content(prompt)
         summary_markdown = response.text + f"\n\n*AI analysis powered by Google Gemini. Processed approximately {word_count:,} words.*"
@@ -138,23 +132,10 @@ async def api_summarize(request: SummarizeRequest):
     try:
         structured_transcript, plain_text = get_transcript_with_ytdlp(request.youtube_url)
         word_count = len(plain_text.split())
-        
         if word_count < 50:
-             return JSONResponse(
-                content={
-                    "summary": "This video is too short to summarize.", 
-                    "transcript": structured_transcript
-                }
-            )
-
+             return JSONResponse(content={"summary": "This video is too short to summarize.", "transcript": structured_transcript})
         summary_markdown = summarize_with_google_ai(plain_text, word_count)
-        
-        return JSONResponse(
-            content={
-                "summary": summary_markdown, 
-                "transcript": structured_transcript
-            }
-        )
+        return JSONResponse(content={"summary": summary_markdown, "transcript": structured_transcript})
     except (ValueError, RuntimeError) as e:
         return JSONResponse(status_code=400, content={"error": str(e)})
     except Exception as e:
